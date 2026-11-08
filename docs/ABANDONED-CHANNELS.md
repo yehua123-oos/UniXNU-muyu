@@ -90,3 +90,27 @@ Android pstore 写入器；`"sheng-log=1"` 由 `drivers/ShengUfs/NativeUfs.cpp` 
 git log --oneline --diff-filter=D -- drivers/MuyuDebug/muyu_usb_debug.c
 git show <删除提交>^:drivers/MuyuDebug/muyu_usb_debug.c > /tmp/muyu_usb_debug.c
 ```
+
+## 7. 仓库外的本地产物去哪儿了
+
+删代码只是删了仓库里的东西。工作区里还堆着这些路线跑过的痕迹——旧的框架克隆、每次产出的
+镜像、早期截图。2026-11-08 23:10 把它们收进 `~/pad7pro-xnu/_archive/`，索引是
+`_archive/README.md`。**只移动，不删除**，`_archive` 不在任何 git 仓里。
+
+| 归档位置 | 内容 | 为什么不在原地 |
+| --- | --- | --- |
+| `_archive/channels/` | 9 个镜像、166M：`init_boot-reader{,-v3,-v4}.img`、`log-reader-muyu.img`、`log-reader-stock.img`、`vendor_boot_{pstore,reader}.img`、`linux-reader/`、`Mu-muyu-debug-20261023.img` | 正是 §4 删除清单对应的产物；0 引用，且从没有过一次刷机结论 |
+| `_archive/rounds/vendor_boot_27/` | 128 个历史轮次镜像、12G | `fw/` 里 158 个早期轮次，只保留被文档引用的 30 个（u91/u92/u98/u101 四个真修复、u157–u159 最后三轮、u83–u100 调试密集段等） |
+| `_archive/repos/` | 11 个过期目录：`UniXNU-27`（摘链的 worktree，分支 `muyu-27` 仍在框架仓 `7bb3ad9`）、`UniXNU-sm8635-common`、`UniXNU-ace5`、`old-modules`、`ios-vermeer-lab`、`vm-qemu` 等 | 已合并或 0 引用 |
+| `_archive/notes/handoffs/` | 15 份 0 引用的旧交接（`HANDOFF-2026-10-25*` 起） | 历史叙述，不进构建 |
+| `_archive/captures/root/` | 50 个早期截图/录屏、1.0G | 无引用 |
+
+`logs/` 故意没动：613 项被 `docs/` 和 `porting.toml` 按路径引用，移走会断取证链。
+`fw/` 的构建输入（`vendor_boot_lite.img`、`data-seed*`、`ipsw/`、`gpu-firmware/`）也都在原地。
+
+另有一处**从归档里救回来的改动**：`UniXNU-27` 的 worktree 里躺着一份未提交修复
+（`scripts/build-xnu-4k-baseline.sh`，25 行），改的是 `prng_random.o_CFLAGS_ADD=-U…` 无条件
+生效、抵消 `CFLAGS_EXTRA` 里的 `-DXNU_SOURCE_CORECRYPTO14=1`，导致干净对象目录下
+`source_corecrypto14_original` / `start_once` 未定义。`UniXNU` main 里没有这个修复，已存为
+`_archive/patches/UniXNU-27-uncommitted-build-xnu-4k-baseline.patch`，需要时 `git apply`。
+
