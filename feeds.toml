@@ -1,4 +1,15 @@
-# Extra sources of the uke build tree; the base feeds.toml supplies the rest.
+# Sources this board adds to the framework's base feeds.
+#
+# The SoC layer is a pinned shared repository, not a vendored copy: [board] soc_source = "sm7675"
+# selects it by name, and every patch the board's series names under soc: comes from this checkout.
+# Re-pin commit and unixnu.lock together; the patch counts quoted in board.toml [kernel] belong to it.
+
+[[source]]
+name = "sm7675"
+kind = "soc"
+git = "https://github.com/Allenwdk/UniXNU-sm7675-common"
+ref = "main"
+commit = "7f857a825a3c1f0882a50eaa824249c714d9679d"
 
 [[source]]
 name = "IOStorageFamily"

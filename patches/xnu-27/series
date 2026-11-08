@@ -6,7 +6,7 @@
 # patches/xnu/*.patch, a schema_version 2 board (this line) needs the list written out.
 # scripts/audit-27-config.py enforces that this file and `ls *.patch` agree.
 #
-# The arch, soc and os layers are NOT copied in here. board.spike27-live.toml references them by
+# The arch, soc and os layers are NOT copied in here. board.toml references them by
 # prefix (arch:patches/xnu/series, soc:patches/xnu-12377/series, os:patches/xnu/series) and the
 # framework resolves each into its own checkout, exactly as UniXNU-uke does. An earlier version of
 # this file pasted all 67 framework patches in as absolute paths; that is why it drifted from the

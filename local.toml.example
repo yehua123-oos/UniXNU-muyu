@@ -1,0 +1,11 @@
+# Copy to local.toml (ignored by Git) to point whole categories at local directories. Each
+# subdirectory is one module. The command line (--local, --local-drivers, --local-module, ...)
+# takes precedence.
+#
+# This port needs no local overrides to build: the SoC layer is pinned in feeds.toml and the
+# device's own drivers live under drivers/. Use it while working on a shared component, for
+# example a clone of ShengUfs that is not the pinned revision:
+#
+# [local]
+# drivers = "~/pad7pro-xnu/UniXNU/drivers"
+# kits = "~/pad7pro-xnu/UniXNU/kits"

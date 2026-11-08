@@ -1,37 +1,38 @@
 # Board description of the Xiaomi Pad 7 Pro (muyu, SM8635 cliffs), read by the unixnu build driver.
-# Derived from UniXNU-braveark (same SM8635 SoC); the SoC-level values below are shared with it.
+#
+# This is the repository's official identity: format 2, iPadOS 27.0.1 (24A446) on the shared SM7675
+# SoC layer, four-layer patch series. The iPadOS 17.7.11 line is the port's earlier format 1 board and
+# is preserved unchanged at tag `line-ipados-17` (docs/IPADOS17-ARCHIVE.md says how to build it).
+schema_version = 2
 
 [board]
 name = "muyu"
 soc = "SM8635"
+soc_source = "sm7675"
+os_profile = "ipados-27.0.1-24A446"
 description = "Xiaomi Pad 7 Pro"
-kit = "muyu"                 # the package/ of this repository appears as kits/braveark in the build tree
+kit = "muyu"                 # the package/ of this repository appears as kits/muyu in the build tree
 
-# The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image. Give --ipsw PATH to use a local file; without
-# it the remote url is read with range requests, only the members that are needed.
-[ipsw]
-url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
-product = "iPad7,1"
-version = "17.7.11"
-build = "21H461"
-device_class = "j120ap"
-chip_id = 0x8011
-board_id = 12
-fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]   # the small components
+# The target OS image comes from the OS profile (ipados-27.0.1-24A446): this board does not pin [ipsw], so the
+# profile's iPad17,3 / 24A446 restore image is used, read with range requests member by member.
 
-[ipsw.sha256]
-"044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
-"044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
+[components]
+# schema 2 assembles only the components a board lists; the 10063 archives below address them by name.
+# XnuPrelink is required: [kernel.prelink] tool points at kits/XnuPrelink/emit_prelink.py, and the
+# 24A446 builders import kc_image from the same directory.
+include = ["ArmDTPlatform", "ArmCpu", "RamBlock", "ShengUfs", "AppleKeyStoreState", "XnuPrelink"]
 
-# The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
-# The GPT entry "userdata" (sda32) of LUN 0. **Derive these from the live GPT every time**: this device's
-# `super` was enlarged once, which moved userdata 2.10 GiB later and changed its size. The values below are
-# from the running system (2026-10-24):
-#   /sys/block/sda/sda32/start = 23691264 sectors (512 B) -> first_lba = 23691264 / 8 = 0x2d3000
-#   /sys/block/sda/sda32/size  = 471908312 sectors       -> 58988539 blocks of 4096 B
-#   last_lba = first_lba + blocks - 1 = 0x3b147fa
-# The previous BSP values (0x24c628..0x3a8b7fa) now point *inside* the current super partition
-# (0x33000..0x2d2fff): using them would overwrite Android's dynamic partitions.
+# The root images the storage builder checks (kernel.py exports these as UNIXNU_ROOT_* / XNU_OWNER_*).
+# image_sha256 is the digest of the raw image the policy was built from (verification.json's
+# image_sha256), NOT the .dmg.aea container digest: the container changes with its wrapper, the
+# image is what the block table covers. The container digests are recorded in
+# scripts/data/owner-os-policy-27.json as dmg_sha256.
+[root]
+os_volume_uuid = "2F8E6EED-68D5-4261-B8A3-12571BAA2DD4"
+os_image_sha256 = "8a12cdad43f8f0d33dadcf01a800a560222baf40c05f71374c460ba57ba3a739"
+systemos_volume_uuid = "F914C62A-AD00-47C6-8281-5746291C339A"
+systemos_image_sha256 = "d5b4873d35c85f96eaafaa31c59602b485afe33b5067eff1af67ba31204cdb4a"
+
 [userdata]
 first_lba = 0x2d3000
 last_lba = 0x3b147fa
@@ -41,7 +42,36 @@ windows = [
   { name = "SystemOS", component = "Cryptex1,SystemOS" },
 ]
 
+[adt.chosen.bytes]
+# The owner boot-set identity this port publishes (scripts/gen-muyu-owner-identity.py in the device
+# repository). These two values must equal owner_boot_set_hash / owner_boot_set_domain in the generated
+# package/OwnerBootIdentity.h, which the root-policy loader compares against.
+boot-manifest-hash = "ee2c1b5cd8ed5e8102f7a9110c8c9328eb398dbaf532ab4021f4c8996c79abb4654a3276a8e430ccc1c78e582f407e15"
+owner-boot-manifest-domain = "4d7579754272696e6775702e4f776e6572426f6f745365742e763100"
+
+[adt.chosen.u32]
+# 2026-11-06: ml_unsafe_kernel_text() asserts unless ml_unsafe_kernel_text_init() found this
+# property in /chosen (iBoot writes it on Apple hardware). SM8635 has no CTRR, so kernel text is
+# writable and 0 is the truthful value: the init sets _unsafe_kernel_text = (0 == value) = true.
+# Without it dtrace_early_init() panics with
+#   machine_routines.c:3379 Assertion failed: _unsafe_kernel_text_initialized
+"kernel-ctrr-to-be-enabled" = 0
+
 [kernel]
+# Four layers, in this order, each resolved into its own checkout — the same shape UniXNU-uke uses.
+# A format 2 board never globs a directory: the plan is exactly these four series files.
+#   arch  64 patches  UniXNU/profiles/arch/arm64e/patches/xnu/series
+#   soc    2 patches  UniXNU-sm7675-common/patches/xnu-12377/series (sheng-platform-power, native-smp-secondary)
+#   os     4 patches  UniXNU/profiles/os/ipados-27.0.1-24A446/patches/xnu/series
+#   device 4 patches  patches/xnu-27/series                         (this repository)
+# 74 total, and `unixnu status --json` prints the resolved order. Counts belong to the pinned sources:
+# re-check them whenever a layer is re-pinned, instead of trusting the numbers in this comment.
+patch_series = [
+  "arch:patches/xnu/series",
+  "soc:patches/xnu-12377/series",
+  "os:patches/xnu/series",
+  "device:patches/xnu-27/series",
+]
 # Userland stage: the full kernel plus the owner cache/Data mounts, the RAM block
 # provider (the Data seed) and the launchd watchdog policy. Under muyu-full_defconfig
 # launchd has no writable /private/var (swap reports EROFS 30) and nothing holds the
@@ -53,44 +83,18 @@ defconfig = "muyu-userland_defconfig"
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
-  "build-arm-driver.py ArmDTPlatform",
-  "build-arm-driver.py ArmCpu",
-  # Userland stage: the AES subclass the storage stack wants (CONFIG_XNU_NATIVE_AES).
-  "build-arm-driver.py SoftwareAES",
-  "build-native-aes-bindings.py",
-  "prepare-storage-headers.py",
-  "build-arm-driver.py ShengUfs --unverified",
-  "build-ufs-original-bindings.py",
-  # The Data seed's typed provider: the packed DBRDISK1 that DarwinBoot hands over is
-  # published by RamBlock, which native_owner_data_prepare() mounts on /private/var.
-  "build-arm-driver.py RamBlock",
-  # RamBlock needs the original IOBlockStorageDevice aliases, but the UFS binder
-  # below already emits them (same pinned candidate, same class, identical .set values).
-  # A second copy of original-bindings.o is 11 duplicate symbols at link time, so the
-  # RAM block archive keeps only its own object and resolves the aliases from libNativeUfs.a.
-  # Upstream's build-native-virtio-bindings.py would need the live storage snapshot
-  # (build/storage-abi/interface-audit.json), which this board does not have.
-  # CONFIG_XNU_SOURCE_MOCKFS: the minimal executable-root filesystem for offline mounts.
-  "build-mockfs-fixture.py",
-  "build-native-legacy-display.py",
-  # pthread is needed by pthread_shims (kernel panics without it at pthread_shims.c:318).
-  # Turned on together with CONFIG_XNU_SOURCE_PTHREAD in the board configuration.
   "build-libpthread-kernel.py",
-  # AMFI panics with "No PMGR?" unless an ApplePMGRNub exists; this kit is the
-  # original-PMGR integration it wants. Paired with CONFIG_XNU_SHENG_PMGR=y and the
-  # sheng-pmgr=2 boot argument.
-  "build-sheng-platform-power.py",
-  # CONFIG_XNU_BOOT_LOG / CONFIG_XNU_WATCHDOG_POLICY: the pram log writer (the next boot
-  # prints "PREVIOUS XNU LOG") and the launchd policy that disables com.apple.watchdogd,
-  # so a missing boot-task check-in no longer resets the board.
   "build-boot-log.py",
-  # "build-muyu-usb-debug.py" was removed from this list on 2026-11-08 along with the driver
-  # (docs/ABANDONED-CHANNELS.md); leaving a manifest entry for a missing script would have made
-  # the build fail at the first driver that cannot be produced.
-  # muyu-thermal=<n>: read-only TSENS survey (package/MuyuThermalProbe.c). Its decode and the
-  # panel row are host-tested by scripts/check-muyu-thermal-host.py, which also re-derives the
-  # controller bases and the sensor map from fw/muyu_dt.txt so the header cannot drift.
-  "build-muyu-thermal.py",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:VirtioMmioBlock",
+  "component:ShengUfs",
+  "component:RamBlock",
+  "component:AppleKeyStoreState",
+  "build-sheng-source-storage.py",
+  # "build-software-aes-27.py",   # needs drivers/SoftwareAES (NativeAES.cpp + OriginalAESABI.h) and the
+  #                               # SoftwareAES component entry; the launcher does not reference AES yet,
+  #                               # so it is off until the 27 storage path actually wants the AES subclass.
 ]
 
 # >>> gpu table (generated by scripts/gen-muyu-gpu-table.py; do not edit by hand)
@@ -156,9 +160,15 @@ sha256 = "463ba9b7d2e3f03ac0e6fa6358bf9c886c689b43af14face6a734bf289439fb4"
 [kernel.prelink]
 tool = "kits/XnuPrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
-kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
-slide = "-0x1000000"
-early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
+# The 24A446 kernelcache, not 21H461: the fixtures the device archives bind against
+# (scripts/data/ipados-27.0.1-24A446/, scripts/check-ipados27-abi-fixtures.py) are keyed to it.
+kernelcache_sha256 = "38e6d9fa5f789b8228f4617ef4c6d2a3fd8ab564abdc9b62920f1db53fc1780a"
+# The 24A446 kexts are linked at 0xfffffe00…; 0x1f000000000 puts them at 0xfffffff0…, the same final
+# region the 21H461 board uses. -0x1000000 (the 21H461 value, inherited by the 27 OS profile) would move
+# them to 0xfffffdff…, outside the kernel's mapped window, and every bound slot would be wrong.
+slide = "0x1f000000000"
+# Unslid, as the prelink emitter takes it and adds the slide.
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe00092551ac"
 # The board's display audits read build/xnu-prelink/<name>.{macho,json}; the prelink stage
 # republishes its plan under this name because the fields they verify are the same.
 reference_candidate = [
@@ -210,10 +220,11 @@ preflight = []
 submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicium-ACPI", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
 patches = []  # TODO: Gic-Spurious.patch 在 braveark 私有 UEFI 仓库里，暂缺
 packages = [
+  "{uefi}/Mu_Basecore",
   "{uefi}",
   "{uefi}/Platforms/Xiaomi",
   "{tree}/package",
-  "{tree}/drivers/DarwinBoot",
+  "/Users/diannao/pad7pro-xnu/UniXNU-27/drivers/DarwinBoot",
   "{edk2}",
   "{uefi}/Common/Mu",
   "{uefi}/Common/Mu_OEM_Sample",
@@ -236,13 +247,50 @@ BUILDID_STRING = "muyu-research"
 [payload]
 # Bring-up: no menu wait at all; spurious USB input events cancel a countdown.
 timeout = 0
+# 2026-11-06: SourceStorage.cpp:89 panicked because this was never set. The payload builder only
+# copies kernel.macho.vroot and only publishes /chosen/memory-map/RootPolicies when [payload]
+# root_policies names the bundle, and native_source_root_policies_load() reads exactly that entry.
+root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"
 volume = "MUYUESP"
-size_mib = 60          # fragments mode keeps the 33.8 MB stock ramdisk; 60 MiB still fits the 96 MiB partition
+size_mib = 94
+# The boot image this line flashes (UniXNU/out/muyu/boot/boot.img, 2026-10-26) predates
+# DarwinBoot's .0/.1 assembly (commit 1598841), so it looks for a single Payloads/kernel.macho.
+# The 95.7 MB kernel still fits the 94 MiB volume unsplit.
+# split_kernel defaults to true: the rebuilt DarwinBoot reassembles kernel.macho.0/.1.          # fragments mode keeps the 33.8 MB stock ramdisk; 60 MiB still fits the 96 MiB partition
+# This board's own ArmCpu owns /cpus. The prelinked AppleARMCPU personality matches by prefix
+# (IONameMatch 'cpu' claims cpu0..cpu7) and then validates an Apple device tree this board does
+# not have, so the payload step retargets it to 'xpu'. Same length, so no offset in the kernel
+# image moves: scripts/patch-prelinked-personality.py.
+native_cpu_owner = true
 loader = "firmware"
 title = "muyu first boot: source 4K XNU to console"
 dram_size = "0x80000000"             # SMEM RAM table observed on the device
 skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
+# 2026-11-06: the console clears the screen at init now, so kernel output is readable by itself.
+# The renderer is only switched on to draw a short bisect marker (a probe parks the kernel after
+# drawing), never for panic text.
 panic_screen = true
+# 2026-11-06: off for this run - the renderer is now uke's proven one (two-pass, console
+# quiesce, writability-clamped clear), so the panic itself is the reading and no probe parks it.
+# entry_probe_fb_after = "__ZN9NativeUfs9startRootEP9IOService"
+# 2026-11-06: off for this run - the renderer is now uke's proven one (two-pass, console
+# quiesce, writability-clamped clear), so the panic itself is the reading and no probe parks it.
+# entry_probe_fb_in = "__ZN9NativeUfs5startEP9IOService"
+# 2026-11-06: off for this run - the renderer is now uke's proven one (two-pass, console
+# quiesce, writability-clamped clear), so the panic itself is the reading and no probe parks it.
+# entry_probe_fb_text = "U1"
+# 2026-11-06: reading panic text on this panel is a dead end for now (rotation/geometry of the
+# renderer do not match the console's). Bisect with the yes/no signal instead: a probe parks the
+# kernel after drawing a short marker, so "any text at all" answers "was this call site reached".
+# 2026-11-06: the boot now reaches bsd_init and panics there (data abort, write to a bogus
+# low pointer). Bisect that window: park right after the call to proc_uuid_policy_init,
+# which sits in the middle of bsd_init before IOKitBSDInit.
+# One question with a readable answer (scripts/patch-xnu-entry-probe.py --fb-probe-after): after the
+# call to initialize_screen() in kernel_bootstrap_thread -- the first call after PE_init_iokit()
+# returns -- draw this line through the panic renderer and park. The line on screen means the kernel
+# got past IOKit initialisation, where every matching prelinked kext (ArmCpu included) starts; no
+# line means the hang is inside PE_init_iokit. The stage bars cover the console, so the boot log from
+# this point on cannot be read on the panel at all.
 # The panel is black after the boot logo and no text ever appears, while the kernel is
 # known to run (reset probes). Two payload-only probes separate the possible causes
 # without a kernel rebuild:
@@ -268,21 +316,56 @@ panic_screen = true
 # entry_probe_fb_after = "_PE_create_console"
 # entry_probe_fb_text = "FB PROBE: kernel writes the panel"
 # The bundle of the two unchanged original trust-cache modules (static + SystemOS cryptex) of
-# 21H461, the same bundle sheng accepts; nothing is added to it.
-trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
+# **24A446**, extracted from this line's own IPSW with scripts/bundle-ipsw-trust.py: module 0 is
+# Firmware/.../043-68950-668.dmg (3547 entries, carries launchd's cdhash 3d2ccf3d...), module 1 is
+# 043-69086-713.dmg (130 entries). The 21H461 bundle sheng/17-line accepts does NOT carry the 27
+# line's launchd, and with no trust cache at all AMFI kills init with namespace 9 / code 0x8
+# (EXEC_EXIT_REASON_SECURITY_POLICY) right after "BSD root: disk5s1". Nothing is added to it.
+trust_cache_sha256 = ["dc655bcb2ddfaea214f9ec83659b3fc8d8b658bafac2b5a004fb4179a25c89bf"]
 kernel_args = [
   # "-v",   # dropped 2026-10-27: console spam buried the panic dump
   "debug=0x14e",
+  # u90: map the shared cache unslid so a raw (un-rebased) chained pointer still names a valid address.
+  "-disable_aslr",
+  # 2026-11-06 u44: observe AppleImage4's ignition_blob handler, which libignition waits on.
+  # NOT WIRED (checked 2026-11-08 across muyu, uke, UniXNU-27, sm8635-common): nothing parses
+  # "muyu-ignition-trace". The u44 two-liner lived in /tmp/spike27's bsd/kern/kern_newsysctl.c
+  # and was never committed as a patch, so the observation that produced IPADOS27-MIGRATION
+  # §6.58.2 ("muyu ignition: enter oldlen=132 newlen=0", never returns) cannot be reproduced
+  # from this repo today. To re-run it, port the hook back into patches/xnu-27/ and list it in
+  # that directory's series first; the argument alone is inert.
+  # "muyu-ignition-trace=1",
+  # 2026-11-06 u47: let the ignition handler take over the gate its holder never releases.
+  # u50: union composition with ignition off; forcing the gate only produced the cork poll loop.
+  # "muyu-ignition-force=1",
+  # arm_vm_init maps _start.._end with the contiguous-entries hint; with the 27 fileset layout
+  # _end reaches into pages the bootstrap already mapped without the hint, and the assert at
+  # arm_vm_init.c:1107 refuses to change the hint bit on an active mapping. Off for bring-up.
+  "use_contiguous_hint=0",
   # DEVELOPMENT kernels keep kprintf off unless this is set; this device has no wired UART,
   # so kprintf then falls back to the framebuffer video console. Graphics boot
   # suppresses text until -bravearktextconsole switches the console to text mode.
-  # The flag name is fixed by zzzzzz-video-console-text.patch (still the BraveArk
-  # spelling): passing -muyutextconsole here is silently ignored, which is why the
-  # panel stayed empty while the kernel itself was running fine.
+  # The flag name is fixed by muyu-console-clear.patch (still the BraveArk spelling), which is the
+  # patch that switches vcattach() to kPETextScreen: passing -muyutextconsole here is silently
+  # ignored, which is why the panel stayed empty while the kernel itself was running fine.
+  # (The 17 line's own zzzzzz-video-console-text.patch also parses this name, but it lives in
+  # patches/xnu/ — the 17 line's directory, not this line's — so it is not applied here.)
   # "-enable_kprintf_spam",   # dropped 2026-10-27: console spam buried the panic dump
   "-bravearktextconsole",
-  # The DWC3 re-attach / CDC ACM console that used to be described here was removed on
-  # 2026-11-08 (docs/ABANDONED-CHANNELS.md).
+  # u124: uke 2026-11-03 fix for the text-console stall, ported as
+  # UniXNU-muyu style. kprintf no longer draws to the framebuffer with IRQs
+  # masked (single-core + ticket lock = silent deadlock); it enqueues to the
+  # console ring instead and a thread_call drains it. Panic output stays
+  # synchronous.
+  # NOT WIRED on this line (checked 2026-11-08): the argument name below is not parsed anywhere
+  # in this repo, and uke's implementation reads "-ukedeferredconsole"
+  # (uke patches/xnu-12377/uke-deferred-video-kprintf.patch), which is a different name and is
+  # not in patches/xnu-27/series. The 17 line keeps the braveark- spelling because its tree
+  # carries the matching patch; this line does not, so passing it here was a no-op.
+  # "-bravearkdeferredconsole",
+  # u128..u159 ran a USB CDC ACM bring-up here (muyu_usb=1 / muyu_usb_panic=1), 29 rounds without a
+  # working enumeration. The driver, its build hook and these arguments were all removed on
+  # 2026-11-08; the panel and the heartbeat are the channel. See docs/ABANDONED-CHANNELS.md.
   # Boot log into the board ramoops record; Android pstore reads it back as
   # /sys/fs/pstore/console-ramoops-0 after the reboot (no root needed).
   # ShengUfs adopts the controller the firmware left running and, for probe 9,
@@ -298,31 +381,53 @@ kernel_args = [
   # root publication refuses to run unless this says so ("signed window identities
   # rejected" otherwise).
   "native-ufs-allow-unverified=1",
+  # 2026-11-06: the version-2 manifest now parses (2 windows + OS.vroot/SystemOS.vroot data
+  # objects) and publication gets to "root window preparation failed"; this makes the failure
+  # path panic with stage=<exact step> result= verify=<vr_open status> instead of one sentence.
+  "native-ufs-diagnostics=1",
   # The firmware UFS driver leaves the SMMU stream mapping in place; repoint it
   # instead of panicking (NativeUFS.cpp "conflicting UFS stream mapping").
   "native-ufs-smmu-takeover=1",
   # Publish the root image (SHNGROOT manifest in userdata) as block devices so the
   # kernel can mount APFS. Requires the userdata root image to be flashed.
+  # 2026-11-06: this is what starts the source-storage subsystem, and its start calls the
+  # __GLOBAL__sub_I_* initializers that register NativeUfs / NativeRamBlock with OSMetaClass.
+  # Without it the bundle is linked but no class is registered, so IOKit logs
+  # "Couldn't alloc class \"NativeUfs\"" for every match and nothing publishes the volumes.
+  # 2026-11-06: the gate SourceStorage.cpp actually reads is "muyu-source-storage" (the device
+  # prefix keeps a 17-line boot out of this code); native-source-storage is a different, uke-side
+  # name — it is parsed by UniXNU-uke/package/SourceStorage.cpp, not by this repo's copy. Passing
+  # it here did nothing; removed 2026-11-08. With the right one,
+  # native_source_storage_start() registers the built-in classes and then
+  # creates/attaches/starts the UFS service against IOPlatformExpertDevice itself.
+  "muyu-source-storage=1",
   "native-ufs-root=1",
   # Bring-up aid: park the CPU after a panic instead of restarting, so the panic
   # text stays on the panel long enough to be read or photographed.
-  "braveark-hold-reboot=1",
+  # NOT WIRED on the 27 line (checked 2026-11-08): the only patches that parse this are
+  # zzzzzzzzz-braveark-hold-reboot.patch and zzzzzzzzz-braveark-hold-restart.patch, and both
+  # live in patches/xnu/ (the 17 line's directory, not this one) — they were never listed in
+  # patches/xnu-27/series. It was live on the
+  # 17 line (u88 used it). Consequence here: a 27-line panic reboots and the panel loses the
+  # text, which is the one thing the panel-only channel cannot afford. Wiring these two back in
+  # (as a pair) is the first item of the screen re-plant, docs/SCREEN-ONLY.md §4.
+  # "braveark-hold-reboot=1",
   "kt_fixed_zones=120",
-  "offline-legacy-register=1",
-  "offline-legacy-gop=1",
-  "offline-legacy-unit-scale=2",
-  "offline-legacy-pm=1",
-  "offline-legacy-validate=1",
-  "offline-legacy-transfer=1",
-  "offline-legacy-cpu-present=1",
-  "offline-legacy-default-surface=1",
+  # "offline-legacy-register=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-gop=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-unit-scale=2",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-pm=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-validate=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-transfer=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-cpu-present=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-legacy-default-surface=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
   # The scanout region is DRAM: map it write-combining instead of Device-nGnRnE (2026-10-25: the device
   # stores of the frame copy are what cap the compositor at a few frames per second). 0 restores the old
   # mapping.
-  "offline-legacy-wcomb=1",
+  # "offline-legacy-wcomb=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
   # Recover a transferred swap that never retires (its latch otherwise stops every later kick and the
   # client waits in it forever). 0 disables the recovery.
-  "offline-legacy-stall-guard=1",
+  # "offline-legacy-stall-guard=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
   "offline-hid-home=1",
   "offline-hid-input=1",
   # Touch digitizer: ShengHidInput arms its HID digitizer source when this is 1 and reads the finger set
@@ -335,29 +440,28 @@ kernel_args = [
   # (2050 reports sent, wrapped dispatchEvent never entered, UI dead). With it OFF the digitizer collection rides
   # on the keyboard device, exactly as sheng's board.toml does it, and iPadOS reacts to the finger. Keep it off.
   # "sheng-touch-split=1",
-  "offline-legacy-phase=4",
+  # "offline-legacy-phase=4",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
   # 2026-10-27 pm: the heartbeat measured exactly 60 swaps per minute (1.0 Hz) - one frame per second, and
   # 1 s is the compositor's swap-wait timeout, i.e. it never gets a vsync. sheng's board sets
   # sheng-vsync=144; this port never set it at all. Without it the whole UI (and the boot progress
   # animation, which advances per presented frame) crawls. The GOP scanout has no vblank, so the driver's
   # work-loop timer sends the family's vsync message instead.
   "sheng-vsync=60",
-  "offline-mobile-graphics-client=1",
-  "offline-mobile-graphics-load=1",
-  "offline-apfs-load=1",
+  # "offline-mobile-graphics-client=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-mobile-graphics-load=1",   # 2026-11-06: off for this run - the display driver takes the scanout and shears the panic text
+  # "offline-apfs-load=1",   # 2026-11-06: the panic sits between bsd_init +0x60 and +0x5c8; these three
+  # runtime kext loads (and our checkpoints right after them) are in that window.
   "-apfs_shared_datavolume",
   "offline-key-events=1",
   # physical power/vol-down/vol-up as HID Consumer (package/ButtonProbeMuyu.cpp); first boot: PON only,
   # vol-up skipped until PPID known.
   "muyu-buttons=1",
-  # The USB CDC ACM console (muyu_usb=1 / muyu_usb_panic=1 / muyu-usb-panic-at=<s>) used to be
-  # declared here. The whole channel was removed on 2026-11-08 - driver, build hook and arguments.
-  # History: docs/ABANDONED-CHANNELS.md.
+  # The USB CDC ACM console arguments used to sit here (duplicated from board.toml). Removed
+  # 2026-11-08 with the rest of that channel: docs/ABANDONED-CHANNELS.md.
   "sheng-log=1",
   # 2026-10-28: persistent-log WRITER. The "bsd/dev/muyu_pstore.c" named here originally was a
   # separate writer that never worked (magic=0, bytes=0) and was deleted with the debug patch on
-  # 2026-11-08; what actually implements sheng-log today is package/BootLog.c +
-  # package/BravearkLastLog.c (the 17-line stack).
+  # 2026-11-08; what implements sheng-log today is package/BootLog.c + package/BravearkLastLog.c.
   # The console text goes into the device tree's ramoops_region @0xa7000000; after a warm reset the
   # stock Android recovery kernel validates that record and exposes it as
   # /sys/fs/pstore/console-ramoops-0, which stock recovery's unauthenticated adbd can pull. That is
@@ -367,7 +471,6 @@ kernel_args = [
   # The pstore writer itself never worked on this board (HANDOFF-2026-10-27 section 28.5: magic=0
   # bytes=0), so re-enable it only together with a working reader experiment.
   # "muyu_pstore=1",
-  "sheng-pmgr=2",
   # 2 = keep Data writes in the persistent store window at the end of userdata (ShengUfs store +
   # RamBlock overlay); pairs with [payload.adt] persistent_data = true and a large seed.
   # 2026-10-27: ephemeral Data (sheng configuration). With AKS published the boot reaches the
@@ -390,7 +493,10 @@ kernel_args = [
   # uke: the reset moved later with this set, so the kernel timer is one of two sources;
   # the other one is watchdogd, handled by CONFIG_XNU_WATCHDOG_POLICY + sheng-disable-watchdogd.
   "wdt=-1",
-  "sheng-smp=1",
+  # 2026-11-06: one CPU for this run. The PAC trap is in the IRQ return path
+  # (_sleh_irq+0x94 retab, ESR key IB) with x30 reloaded as a function entry;
+  # single-CPU separates the timer/device IRQ path from the IPI path.
+  "sheng-smp=0",
   # Bring-up dump: ten minutes into userland, panic with the display-path counters and the kept kernel
   # messages. Timed rather than marker-based: the first ReportCrash of a boot can come well before the
   # lock screen (2026-10-25 09:16: an 82 s marker put the dump at 142 s, before any display client), and
@@ -524,7 +630,8 @@ kernel_args = [
   # "offline-hid-auto-home=90",   # dropped 2026-10-27: unattended-test automation, cmdline budget for the AKS probe
   # "offline-hid-auto-home-count=6",   # dropped 2026-10-27: unattended-test automation, cmdline budget for the AKS probe
   # "offline-hid-auto-home-interval=60",   # dropped 2026-10-27: unattended-test automation, cmdline budget for the AKS probe
-  "armcpu-spi-ipi=1",
+  # Off with sheng-smp=0: no other core to signal, so no SPI-pended IPI is sent.
+  "armcpu-spi-ipi=0",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
 ]
@@ -540,7 +647,10 @@ chip_id = "207"
 # SIGTRAP when they overrun their deadline, and the 4.6 GiB window made early boot much slower than
 # the 3 GiB one that actually reached the lock screen (2026-10-25 measurement).
 owned_memory_size = "0x130000000"     # 回到 4.75 GiB：2/3 GiB 都救不了 boot-task 超时（§36.4）
-root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# 2026-11-06: the 27 root image (built from 24A446) carries OS volume 2F8E6EED-68D5-4261-B8A3-12571BAA2DD4,
+# the same value [root] os_volume_uuid pins. The previous value was the 17 line's volume, so
+# IOFindBSDRoot() could never have matched the root media.
+root_match_volume_uuid = "2F8E6EED-68D5-4261-B8A3-12571BAA2DD4"
 # 2026-11-03 night (upstream correction, see UniXNU/scripts/check-mount-phase-checkpoints.py): the
 # original OS runs `mount -P 1` with env 0 because no user-device-tree fstab exists, and then a missing
 # Data volume and a missing /private/preboot bindfs source are only warnings. The only fatal input for
@@ -597,3 +707,15 @@ props = [
   { name = "linux,initrd-start", type = "x", value = ["0x1000000"] },
   { name = "linux,initrd-end", type = "x", value = ["0x6000000"] },
 ]
+
+# No Apple PMGR or SEP on this SoC: report a virtual platform so AMFI does not wait for an
+# ApplePMGRNub, and the native UFS root needs no sheng PMGR stand-in. This is the same answer the
+# other iPadOS 27 board gives (UniXNU-uke board.toml, [adt.defaults.u32] "vmm-present" = 1) and it is
+# what makes build-sheng-platform-power.py unnecessary here.
+[adt.defaults.u32]
+"vmm-present" = 1
+
+# The hardware tree the ADT generator compiles (schema 2): memory, CPUs, PSCI, GIC and the UFS anchor.
+# Values are the ones the working iPadOS 17 image already declares (scripts/make-muyu-adt.py).
+[device_tree]
+source = "device:dts/muyu.dts"

@@ -1,0 +1,21 @@
+# iPadOS 17 line (21H461) device layer: the 16 patches of this directory, in the order a
+# format 1 board applies them. The current board.toml is the 27 line and names
+# device:patches/xnu-27/series instead, so nothing here is applied to a 27-line kernel.
+# The file exists so the layer is stated rather than implied by a glob; the 17 line itself
+# is tag `line-ipados-17` (docs/IPADOS17-ARCHIVE.md).
+offline-owner-root-auth-bypass.patch
+zzzz-offline-owner-systemos-bringup.patch
+zzzzz-video-console-physical-fb.patch
+zzzzzz-video-console-text.patch
+zzzzzzz-last-panic-print.patch
+zzzzzzzz-braveark-watchdog-policy.patch
+zzzzzzzzz-braveark-hold-reboot.patch
+zzzzzzzzz-braveark-hold-restart.patch
+zzzzzzzzzzzz-muyu-console-quiet.patch
+zzzzzzzzzzzzz-stackshot-tolerate-thread-count-drift.patch
+zzzzzzzzzzzzzz-shared-region-map-trace.patch
+zzzzzzzzzzzzzzz-critexit-reason.patch
+zzzzzzzzzzzzzzzz-spawn-mount-argv.patch
+zzzzzzzzzzzzzzzzz-mount-syscall-trace.patch
+zzzzzzzzzzzzzzzzzz-exec-trace.patch
+zzzzzzzzzzzzzzzzzzz-console-tail.patch

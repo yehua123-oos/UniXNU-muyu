@@ -1,0 +1,16 @@
+# muyu proprietary firmware inputs. Format: path|sha256, a leading - marks an optional file.
+#
+# Provenance: the GPU triplet and the touch image are dumped from the tablet's own partitions
+# (/vendor/firmware and /odm/firmware); the local copies used for the current builds are
+# fw/gpu-firmware/ and .cache/firmware/novatek/ in the workspace, never in this repository.
+# board.toml [gpu.firmware_pins] carries the same three digests: extracting a file that does
+# not match these hashes is a firmware change, not a build problem, and the board pin has to
+# move with it.
+#
+# The touch image is the public NT36532E build (PROVENANCE.md next to it in .cache/firmware):
+# muyu's own vendor firmware is a request_firmware() file that no unprivileged path on the
+# device can read. scripts/gen-touch-firmware.py consumes it.
+gpu/gen71100_sqe.fw|b6df660d109504dbea5a266910b037a33d893a11c6de52f524a5fd112008c401
+gpu/gen71100_gmu.bin|435c7bac9a328b8a100df930b84b65b4d579e42be44785d0e60e3729291bb864
+gpu/gen71100_zap.mbn|463ba9b7d2e3f03ac0e6fa6358bf9c886c689b43af14face6a734bf289439fb4
+novatek/novatek_nt36532_n81a_fw_csot.bin|358d7115e8be27926d57aaffbf2d0313edb810cc6b532869d17148fb00f918cd

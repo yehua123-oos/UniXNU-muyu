@@ -28,13 +28,16 @@ Exit status: 0 = clean, 1 = at least one FAIL.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BOARD = ROOT / "board.spike27-live.toml"
+BOARD = ROOT / "board.toml"
 
 # Boot arguments that XNU itself parses. Verified by reading the upstream names,
 # not by guessing: these live in osfmk/pexpert and bsd/, which this repo does not
@@ -51,11 +54,11 @@ XNU_NATIVE = {
     "ml-timeout-lock-panic-scale",  # osfmk/ml lock timeout
 }
 
-# Parsed by the sibling framework repo (UniXNU-27 drivers), not by this one.
+# Parsed by the sibling framework checkout (UniXNU drivers), not by this one.
 # Each entry names the file that reads it, so the claim stays checkable.
 FRAMEWORK_PARSED = {
-    "sheng-smp": "UniXNU-27/drivers/ArmCpu/ArmCpu.cpp",
-    "armcpu-spi-ipi": "UniXNU-27/drivers/ArmCpu/ArmCpu.cpp",
+    "sheng-smp": "UniXNU/drivers/ArmCpu/ArmCpu.cpp",
+    "armcpu-spi-ipi": "UniXNU/drivers/ArmCpu/ArmCpu.cpp",
 }
 
 # Files removed on 2026-11-08 (see docs/ABANDONED-CHANNELS.md). Any live mention
@@ -163,6 +166,41 @@ def _series_entries(path: Path) -> list[str]:
     ]
 
 
+def _soc_path(board: dict) -> tuple[Path | None, str]:
+    """The SoC checkout the framework will actually use for this board.
+
+    The framework resolves [board] soc_source through feeds.toml to
+    out/feeds/<repo-name>-<sha1(git + commit)[:8]>. Globbing a sibling
+    UniXNU-*-common instead is how this audit once counted one SoC patch while the
+    build resolved two from a different repository: same series path, different
+    file set, and the totals disagreed by one with nothing pointing at the cause.
+    """
+    name = board.get("board", {}).get("soc_source")
+    if not name:
+        return None, "[board] soc_source is not set"
+    feeds = ROOT / "feeds.toml"
+    if not feeds.is_file():
+        return None, "feeds.toml is missing"
+    sources = tomllib.loads(feeds.read_text(encoding="utf-8")).get("source", [])
+    entry = next((s for s in sources if s.get("name") == name and s.get("kind") == "soc"), None)
+    if entry is None:
+        return None, f'feeds.toml has no kind = "soc" source named {name}'
+    git, commit = entry.get("git", ""), entry.get("commit", "")
+    if not git or not commit:
+        return None, f"soc source {name} needs git and commit"
+    key = hashlib.sha1(f"{git}\n{commit}".encode()).hexdigest()[:8]
+    wanted = f"{Path(git).stem}-{key}"
+    for fw in framework_roots():
+        candidate = fw / "out/feeds" / wanted
+        if (candidate / ".git").is_dir():
+            return candidate, ""
+    # A local checkout of the same repository is acceptable while developing.
+    sibling = ROOT.parent / f"UniXNU-{name}-common"
+    if sibling.is_dir():
+        return sibling, ""
+    return None, f"soc {name} is not fetched: {wanted} is missing under a framework out/feeds"
+
+
 def _resolve_layer(entry: str, board: dict) -> tuple[Path | None, str]:
     """Resolve one "layer:relative" series reference to a file.
 
@@ -191,8 +229,10 @@ def _resolve_layer(entry: str, board: dict) -> tuple[Path | None, str]:
                 if (fw / "profiles/os" / board["board"]["os_profile"] / rel).is_file()]
         return (hits[0], "") if hits else (None, "no os series in the framework checkouts")
     if layer == "soc":
-        hits = [p / rel for p in sorted(ROOT.parent.glob("UniXNU-*-common")) if (p / rel).is_file()]
-        return (hits[0], "") if len(hits) == 1 else (None, f"soc layer not found in {len(hits)} repos")
+        soc, why = _soc_path(board)
+        if soc is None:
+            return None, why
+        return soc / rel, ""
     return None, f"unknown layer {layer!r}"
 
 
@@ -208,7 +248,7 @@ def check_series(board: dict) -> None:
     series_refs = board.get("kernel", {}).get("patch_series", [])
     if not series_refs:
         fail("kernel.patch_series", "empty")
-        return
+        return None
 
     total: list[Path] = []
     for ref in series_refs:
@@ -242,7 +282,7 @@ def check_series(board: dict) -> None:
     dev = ROOT / "patches/xnu-27"
     if not dev.is_dir():
         fail("patches/xnu-27/", "missing: the 27 line's device patch directory")
-        return
+        return len(total)
     listed = [ln for ln in _series_entries(dev / "series") if ":" not in ln] if (dev / "series").is_file() else []
     on_disk = sorted(p.name for p in dev.glob("*.patch"))
     if not (dev / "series").is_file():
@@ -260,6 +300,7 @@ def check_series(board: dict) -> None:
         fail("patches/xnu-27/series vs directory", "; ".join(detail))
     else:
         ok("patches/xnu-27/series vs directory", f"{len(on_disk)} patches, name order")
+    return len(total)
 
 
 def check_line_separation() -> None:
@@ -278,8 +319,8 @@ def check_line_separation() -> None:
     if shared:
         fail("patch directories overlap", ", ".join(shared) + " exists in both lines' directories")
     else:
-        ok("line separation", f"{len(list(a.glob('*.patch')))} patches for the 17 line (globbed), "
-                               f"{len(list(b.glob('*.patch')))} for the 27 line (listed)")
+        ok("line separation", f"{len(list(a.glob('*.patch')))} patches kept for the 17 line (tag), "
+                               f"{len(list(b.glob('*.patch')))} applied by this board")
 
 
 
@@ -333,8 +374,14 @@ def check_kernel_args(args: list[str], texts: dict[Path, str]) -> None:
 
 
 def framework_roots() -> list[Path]:
-    """Sibling framework checkouts that a device repo is allowed to reference."""
-    return [p for p in (ROOT.parent / "UniXNU-27", ROOT.parent / "UniXNU") if p.is_dir()]
+    """The sibling framework checkout a device repo is allowed to reference.
+
+    One checkout, deliberately: the port used to build against a second clone
+    (UniXNU-27) whose scripts/unixnu and patch series drifted from this one, and the
+    only way to notice was to diff the two trees by hand. That clone is frozen now;
+    everything it carried lives in ../UniXNU.
+    """
+    return [p for p in (ROOT.parent / "UniXNU",) if p.is_dir()]
 
 
 def check_tool_paths(board: dict) -> None:
@@ -354,7 +401,7 @@ def check_tool_paths(board: dict) -> None:
             ok(label, rel)
             continue
         # kits/ and most scripts/ are provided by the framework, not the device repo:
-        # prelink tooling especially (UniXNU-27/kits/XnuPrelink/emit_prelink.py).
+        # prelink tooling especially (UniXNU/kits/XnuPrelink/emit_prelink.py).
         hit = next((f for f in framework_roots() if (f / rel).exists()), None)
         if hit is not None:
             external(label, f"{rel} (provided by {hit.name})")
@@ -363,7 +410,7 @@ def check_tool_paths(board: dict) -> None:
 
 
 def check_dangling(board: dict, texts: dict[Path, str]) -> None:
-    haystacks = {"board.spike27-live.toml": BOARD.read_text(encoding="utf-8")}
+    haystacks = {"board.toml": BOARD.read_text(encoding="utf-8")}
     ser = ROOT / "patches/xnu-27/series"
     if ser.exists():
         haystacks[str(ser.relative_to(ROOT))] = ser.read_text(encoding="utf-8")
@@ -433,6 +480,42 @@ def check_embedded_copies() -> None:
         external("embedded driver copies", "no mirrored files found")
 
 
+def check_framework_resolution(board: dict, total: int | None) -> None:
+    """Cross-check this audit's arithmetic against the framework's own resolver.
+
+    The audit re-implements series resolution on purpose (it has to run from a device
+    checkout), and a re-implementation drifts. So the last word belongs to
+    `unixnu status --json`: if the two disagree about how many patches the board
+    applies, one of them is wrong and the message says which number came from where.
+    """
+    fw = next((f for f in framework_roots() if (f / "unixnu").is_file()), None)
+    if fw is None:
+        external("framework resolution", "no framework checkout to cross-check against")
+        return
+    try:
+        done = subprocess.run([sys.executable, str(fw / "unixnu"), "status", "--json", "-D", str(ROOT)],
+                              capture_output=True, text=True, timeout=240, cwd=str(fw))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        external("framework resolution", f"status did not run: {exc}")
+        return
+    if done.returncode != 0:
+        tail = (done.stderr or done.stdout).strip().splitlines()
+        fail("framework resolution", f"status failed: {tail[-1] if tail else 'no output'}")
+        return
+    try:
+        data = json.loads(done.stdout)
+    except ValueError:
+        fail("framework resolution", "status --json did not print JSON")
+        return
+    applied = len(data.get("patch_order") or [])
+    soc = str((data.get("profiles") or {}).get("soc") or "")
+    detail = f"{applied} patches, soc {Path(soc).name if soc else 'unknown'}"
+    if total is not None and applied != total:
+        fail("framework resolution", f"the framework applies {applied}, this audit counted {total}")
+    else:
+        ok("framework resolution", detail)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quiet", action="store_true", help="only FAIL lines and the summary")
@@ -443,8 +526,9 @@ def main() -> int:
 
     check_board(board)
     check_defconfig(board.get("kernel", {}).get("defconfig", ""))
-    check_series(board)
+    total = check_series(board)
     check_line_separation()
+    check_framework_resolution(board, total)
     check_framework_divergence(board)
     args = board.get("payload", {}).get("kernel_args", [])
     check_kernel_args(args, texts)

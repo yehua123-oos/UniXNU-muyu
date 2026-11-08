@@ -3,12 +3,13 @@
 Device repository for running [UniXNU](https://github.com/UniXNU/UniXNU) on the
 **Xiaomi Pad 7 Pro** (codename `muyu`, Qualcomm SM8635 "cliffs", Adreno 735).
 
-Two OS lines live here, both with an iPadOS root on `userdata`:
+Two OS lines live here, both with an iPadOS root on `userdata`. The repository has one official
+identity — the 27 line, format 2 — and the 17 line is preserved intact at a tag:
 
-| Line | Board file | State |
+| Line | Where | State |
 | --- | --- | --- |
-| iPadOS **27.0.1** (24A446) | `board.spike27-live.toml` | main line — userland runs from the shared cache; blocked on dyld's slide |
-| iPadOS **17.7.11** (21H461) | `board.toml` | fallback — boots to the desktop, ~1.4 fps; GPU paused |
+| iPadOS **27.0.1** (24A446) | `board.toml` (format 2, `schema_version = 2`) | main line — userland runs from the shared cache; blocked on dyld's slide |
+| iPadOS **17.7.11** (21H461) | tag `line-ipados-17` (format 1 board) | fallback — boots to the desktop, ~1.4 fps; GPU paused |
 
 **Start with [`STATUS.md`](STATUS.md)** — it is the hand-off, and it says what is currently
 on the tablet, which is not what either line's progress suggests.
@@ -18,8 +19,7 @@ Derived from [UniXNU-braveark](https://github.com/tattwamashi/UniXNU-braveark)
 `braveark` names (`drivers/BravearkPreflight`, `package/BravearkLastLog.c`, the
 `-bravearktextconsole` boot argument, the `BRAVEARK:` log prefix and two XNU
 patches); names specific to this device use `muyu` (`kits/muyu`, the `muyu-*`
-boot arguments). The board file in use is the authority for the device identity — per line, as
-above.
+boot arguments). `board.toml` is the authority for the device identity.
 
 ## Status
 
@@ -87,22 +87,21 @@ The build and flashing procedures are the UniXNU ones; this repository only adds
 board configuration and the device code under `package/`, `drivers/`, `kits/muyu` and
 `patches/`. Two things to know before the first build:
 
-**`unixnu` reads `board.toml` and nothing else.** The 27 line's configuration is archived as
-`board.spike27-live.toml` (schema 2, the file that built the current images); the tracked
-`board.toml` is the schema-1 21H461 template. Pick a line by putting its file in place:
+**`unixnu` reads `board.toml`, and this repository has exactly one.** It is the 27 line's format 2
+board; a build starts from a clean checkout with no file to copy first. The 17 line is a tag, not a
+second board — take it out in a separate worktree when you need that image:
 
 ```bash
-cp board.spike27-live.toml board.toml   # 27 line
-git checkout board.toml                 # back to the 17 line
+git worktree add ../UniXNU-muyu-17 line-ipados-17   # the 17 line, format 1 board inside
 ```
 
-**One patch directory per line.** `patches/xnu/` belongs to the 17 line: a schema-1 board never
-names a series, so the build globs that directory and applies every `.patch` in filename order.
-`patches/xnu-27/` belongs to the 27 line and carries its own `series`, which is nothing but the
-listing of that directory — a schema-2 board has to write the list down. The framework layers
+**One patch directory per line.** `patches/xnu-27/` is the current board's device layer and carries
+its own `series`, which is nothing but the listing of that directory — a format 2 board writes the
+list down instead of globbing. `patches/xnu/` is the 17 line's device layer, kept so the tag builds;
+the board no longer names it, so nothing from it reaches a 27-line kernel. The framework layers
 (arch, soc, os) are referenced by prefix, never copied in. Keep them apart in both directions: a
-27-line patch in `patches/xnu/` is applied to a 17-line kernel, and a 17-line patch moved out of
-it disappears from that kernel, both silently.
+27-line patch in `patches/xnu/` would be applied to a 17-line kernel, and a 17-line patch moved out
+of it disappears from that kernel, both silently.
 
 **Every build carries a generated tag** (`27-scr-1108a`), not a hand-typed `u` number — the tags
 are written into 23 separate `printf`s historically, which is why a u155 image once reported

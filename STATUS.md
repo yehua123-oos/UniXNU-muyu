@@ -116,16 +116,16 @@ re-plant, not a rewrite.
 
 ## Build and flash
 
-**Two board files, and this trips people up.** `unixnu` reads `<device>/board.toml` and nothing
-else:
+**One board file, format 2.** `unixnu` reads `<device>/board.toml` and nothing else, and that file
+is the 27 line:
 
 | File | Schema | Line |
 | --- | --- | --- |
-| `board.toml` | 1 | 21H461 (the historical template) |
-| `board.spike27-live.toml` | 2, 703 lines | 24A446 — byte-identical to the `/tmp/spike27` copy that built today's images |
+| `board.toml` | 2, `schema_version = 2`, four-layer series | 24A446 — the repository's official identity |
+| tag `line-ipados-17` | 1, dated 2026-11-08 | 21H461 — archived, not a second board |
 
-So a 27-line build starts by putting the live config in place (`cp board.spike27-live.toml
-board.toml`), and `git checkout board.toml` puts the 17 line back.
+A 27-line build starts from a clean checkout: no file to copy into place. The 17 line is taken out in
+its own worktree (`git worktree add ../UniXNU-muyu-17 line-ipados-17`) when that image is needed.
 
 Builds are tagged `<line>-<purpose>-<MMDD><letter>` — `27-scr-1108a`. The tag is generated, not
 typed into `printf`s (that is how a u155 image once read u151):
@@ -135,21 +135,24 @@ python3 scripts/build-tag.py next --purpose scr --note "what this round is for"
 python3 scripts/build-tag.py show        # the tag this build will carry
 ```
 
-Then the three steps, with the 24A446 kernelcache:
+Then the three steps, with the 24A446 kernelcache. One framework checkout (the merged `UniXNU`),
+and the output directory is the resolver's: `out/muyu/<os_profile>/<config>/`:
 
 ```bash
-cd UniXNU-27 && python3 unixnu build kernel -D ../UniXNU-muyu \
+cd UniXNU && python3 unixnu build kernel -D ../UniXNU-muyu \
     --kernelcache out/ipsw/24A446/kernelcache.decompressed
-python3 unixnu build payload -D ../UniXNU-muyu --kernel out/muyu/kernel/kernel.macho \
+python3 unixnu build payload -D ../UniXNU-muyu \
+    --kernel out/muyu/ipados-27.0.1-24A446/muyu-userland/kernel/kernel.macho \
     --unique-chip-id 0000000000000001 --owner-trust-cache /tmp/muyu-static-system.bundle \
     --data-ramdisk ../fw/data-seed/muyu-data-200g.dbr
-python3 ../UniXNU-muyu/scripts/build-tag.py check out/muyu/kernel/kernel.macho
+python3 ../UniXNU-muyu/scripts/build-tag.py check out/muyu/ipados-27.0.1-24A446/muyu-userland/kernel/kernel.macho
 ```
 
 `vendor_boot` is assembled by `scripts/patch-vendor-boot.py` from `fw/vendor_boot_lite.img`; the
 full sequence, including the `set_active a` and the pair-flashing rule, is in the workspace
-`AGENTS.md`. The 17-line commands (with `--kernelcache out/ipsw/21H461/...`) are unchanged and
-still work.
+`AGENTS.md`. The 17 line keeps its own commands (with `--kernelcache out/ipsw/21H461/...`) and still
+builds from the tag, but its output lands in a format 1 directory (`out/muyu/`), not under the
+27-line path.
 
 ## Keeping the 27 line clean
 
@@ -175,9 +178,11 @@ What it enforces, and why each one earns its place:
 | `device:` / `scripts/` / `kits/` references resolve, here or in a framework checkout | paths to files deleted three hand-overs ago |
 | no live mention of the 2026-11-08 removals | dangling references to the removed USB/Linux channels |
 | wip patch copies == `drivers/MuyuDebug/` | two copies of one driver drifting apart |
-| the two framework checkouts agree on `patches/xnu-12377` | the same series producing two different kernels |
+| the soc layer resolves through `[board] soc_source` + `feeds.toml`, not by globbing a sibling repo | an audit that counts patches from a different SoC repository than the build uses |
+| the audit's patch count equals `unixnu status --json` | the re-implementation above drifting away from the framework it models |
 
-State at 2026-11-08 22:05: **12 ok, 9 external, 0 fail, 33 kernel_args, 73 patches.**
+State at 2026-11-08 23:05: **13 ok, 9 external, 0 fail, 33 kernel_args, 74 patches** (the framework
+resolver agrees: 74, soc `UniXNU-sm7675-common-01e86595`).
 
 ### The patch structure is the 17 line's, not a list somebody maintained
 
@@ -187,29 +192,35 @@ order. **The directory is the series.** A `schema_version 2` board has to write 
 the 27 line keeps the same rule in a form the framework can read:
 
 ```
-board.spike27-live.toml
+board.toml
   arch:patches/xnu/series        64   UniXNU/profiles/arch/arm64e/…
-  soc:patches/xnu-12377/series    1   UniXNU-sm8635-common/…  (sheng-platform-power)
+  soc:patches/xnu-12377/series    2   UniXNU-sm7675-common/…  (sheng-platform-power, native-smp-secondary)
   os:patches/xnu/series           4   UniXNU/profiles/os/ipados-27.0.1-24A446/…
   device:patches/xnu-27/series    4   this repository
                                   ──
-                                  73
+                                  74
 ```
+
+The soc row used to say `UniXNU-sm8635-common` and 1 patch: the board has always selected
+`sm7675`, and the audit was counting a sibling repository by glob instead of reading
+`soc_source`. It reads `feeds.toml` now, and the number agrees with the resolver.
 
 `patches/xnu-27/series` is nothing but the listing of `patches/xnu-27/`, in filename order — the
 same shape as `UniXNU-uke`, and the audit fails if the two ever disagree. Nothing from another
 layer is copied in: an earlier version of this file pasted 67 framework patches in as absolute
 paths, which is exactly how it drifted out of step with the framework without anyone noticing.
 
-**Two directories, because two lines.** `patches/xnu/` is the 17 line's (16 patches: video
-console, last-panic replay, watchdog policy, hold-reboot, the launchd traces) and is still applied
-by the glob. `patches/xnu-27/` is this line's (4). They must not mix in either direction — a
-27-line patch parked in `patches/xnu/` is applied to a 17-line kernel, and a 17-line patch moved
-out of it silently disappears from that kernel. Both had happened.
+**Two directories, but one live.** `patches/xnu-27/` is the board's device layer (4 patches).
+`patches/xnu/` is the 17 line's (16 patches: video console, last-panic replay, watchdog policy,
+hold-reboot, the launchd traces) and is kept so tag `line-ipados-17` builds; the board names it
+nowhere, and the audit fails if a file appears in both. The direction that used to bite — a 27-line
+patch parked in `patches/xnu/` applied to a 17-line kernel, or a 17-line patch moved out of it and
+silently dropped — cannot happen with the 17 line archived.
 
-**Against u159: 73 patches instead of 72, one patch different.** The addition is
-`arm64e-threaded-starts.patch`, which the arch layer has carried since and the pasted list missed.
-Everything else is the same set, in the framework's own order rather than u159's.
+**Against u159: 74 patches instead of 72.** Two additions, both real: `arm64e-threaded-starts.patch`
+(the arch layer has carried it since and the pasted list missed it) and
+`native-smp-secondary.patch` (the SM7675 SoC layer's second patch, absent from the 1-patch sm8635
+checkout the old count came from).
 
 The rest of the cleanup: the `configs/muyu-27_defconfig` reference now points at the
 `muyu-userland_defconfig` the board actually names, and four inert arguments
@@ -222,10 +233,10 @@ this line does not read. So a 27-line panic reboots and the panel loses the text
 thing a panel-only channel cannot afford. Wiring those two patches in (they are a pair) is the
 first item of the screen re-plant.
 
-One deviation is recorded, not fixed, because it is framework work: the two framework checkouts
-disagree on three of the compatibility patches (`offline-owner-boot-manifest`,
-`offline-owner-systemos-mount`, `zzz-boot-progress`, core-repo copies newer), so the same series
-builds differently under `UniXNU` and `UniXNU-27`. The audit reports it.
+The framework deviation recorded here earlier is closed: `UniXNU` is now the one checkout. It was
+unshallowed, merged onto upstream `f924843`, and the eight 27-line commits that had only ever
+existed in the second clone were merged in on top, so the same series cannot build two different
+kernels depending on which directory you `cd` into.
 
 ## Next steps, in order
 
@@ -268,7 +279,7 @@ all still here.
 | `docs/` | 21 documents; `HANDOFF-2026-11-0{7,8}.md` are the two long ones |
 | `drivers/MuyuDebug/` | the screen/USB sources, rescued out of `.cache/xnu-work` on 2026-11-08 |
 | `patches/xnu/wip/` | `muyu-screen-wip-20261108.patch` — the full diff those sources came from, not yet split |
-| `/tmp/spike27` and `/tmp/spike27-out` | the live build inputs and tree for the 27 line; **volatile**, and the reason `board.spike27-live.toml` was archived |
+| `/tmp/spike27` and `/tmp/spike27-out` | the temp tree the 27 line was built from before 2026-11-08; no longer an input, kept only because its logs are cited |
 
 ## Syncing this repository
 

@@ -1,43 +1,49 @@
 schema_version = 1
-# 首次建档 2026-11-08（由 uke 仓的 porting.toml schema 复制而来，领域 id 一一对应，
-# 便于两条线并排读）。状态词汇与 uke 相同：device-verified / host-verified /
-# implemented / not-applicable；本档新增 unknown —— 表示「没有可引用的证据」，
-# 不允许把 unknown 写成 implemented。
+# First written 2026-11-08 from the uke repository's porting.toml, with the area ids kept identical
+# so the two records read side by side. Status vocabulary is the schema's own: device-verified /
+# host-verified / implemented / planned / not-applicable. There is no "unknown": work with no
+# citable evidence is `planned`, and an area with nothing to do is `not-applicable`.
 #
-# 两条 OS 线并存：21H461（17.7.11）线已到桌面但 CPU 合成；24A446（27.0.1）线是
-# 当前主线，到 APFS/cryptex/owner-cache 层。每个 area 的 status 按「当前主线」给，
-# 旧线结论放 findings，并注明线别。
+# The record describes the repository's single board: iPadOS 27.0.1 / 24A446 (board.toml, format 2).
+# The 17.7.11 / 21H461 line is archived at tag `line-ipados-17` (docs/IPADOS17-ARCHIVE.md) and its
+# results appear in findings, marked as the 17 line.
+#
+# evidence.revision is the commit the result was recorded at — 40 hex digits, because the checker
+# compares it against the repository. Where the original entry carried a round number or a
+# timestamp instead (u159, "2026-11-08 16:13"), that text is kept inside result as
+# "; recorded <text>", so nothing is lost when the commit takes its place.
 
 [device]
 name = "muyu"
 soc = "SM8635"
 os_profile = "ipados-27.0.1-24A446"
-summary = "Muyu 27-spike: payload reaches APFS SystemCryptex mount and owner-cache enumeration (panel photo 2026-11-08 14:36); the panel is the only log channel — USB CDC ACM (blocked at DEPCFG, 16 probes accepted / 0 executed) and the Linux pstore/init_boot-reader were abandoned 2026-11-08 and their code removed the same day (docs/ABANDONED-CHANNELS.md); device restored to stock 2026-11-08 16:18 with no recorded reason. 17-line desktop (CPU-composed ~1.4 fps) predates this ledger. GMU cold start + full HFI device-verified 2026-10-30; GX rail blocked; GPU paused since 2026-11-02. See docs/HANDOFF-2026-11-08.md and STATUS.md."
+summary = "Muyu, iPadOS 27.0.1 (24A446) line as the repository's official format 2 board: payload reaches APFS SystemCryptex mount and owner-cache enumeration (panel photo 2026-11-08 14:36); the panel is the only log channel — USB CDC ACM (blocked at DEPCFG, 16 probes accepted / 0 executed) and the Linux pstore/init_boot-reader were abandoned 2026-11-08 and their code removed the same day (docs/ABANDONED-CHANNELS.md); device restored to stock 2026-11-08 16:18 with no recorded reason. 17-line desktop (CPU-composed ~1.4 fps) predates this ledger. GMU cold start + full HFI device-verified 2026-10-30; GX rail blocked; GPU paused since 2026-11-02. The 17.7.11 (21H461) line boots to a CPU-composed desktop (~1.4 fps) and is archived at tag line-ipados-17 (docs/IPADOS17-ARCHIVE.md). See docs/HANDOFF-2026-11-08.md and STATUS.md."
 
 [[area]]
 id = "configuration"
 status = "host-verified"
 components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink"]
-paths = ["board.spike27-live.toml", "configs/muyu-userland_defconfig", "patches/xnu-27/"]
-inputs = ["Schema-2 board (soc_source = sm7675, os_profile = ipados-27.0.1-24A446); archived into the repo as board.spike27-live.toml on 2026-11-08 16:05, byte-identical to /tmp/spike27/board.toml.",
+paths = ["board.toml", "feeds.toml", "unixnu.lock", "configs/muyu-userland_defconfig", "patches/xnu-27/"]
+inputs = ["board.toml is the board (schema_version = 2, soc_source = sm7675, os_profile = ipados-27.0.1-24A446). It is the only board file in the repository; the 17 line is the tag line-ipados-17.",
+  "The SoC layer is pinned in feeds.toml (kind = \"soc\", name = sm7675) at 7f857a8, and unixnu.lock records the same commit, so the two cannot drift.",
   "24A446 kernelcache sha256 38e6d9fa5f789b82... — the same OS-profile member the uke line prelinks against (kernel.json inputs.kernelcache_sha256).",
-  "Framework UniXNU-27 + /tmp/spike27-out build tree; build env: UNIXNU_DEVICE=/tmp/spike27 UNIXNU_OUT=/tmp/spike27-out."]
-configuration = ["schema_version2, SM8635 device on the sm7675 24A446 OS profile, muyu kit. Patch series is four layers, the shape UniXNU-uke uses: arch:patches/xnu/series (64) + soc:patches/xnu-12377/series (1) + os:patches/xnu/series (4) + device:patches/xnu-27/series (4) = 73.",
+  "Framework: the ../UniXNU checkout (one framework, upstream main merged plus the 27-line commits), output under out/muyu/ipados-27.0.1-24A446/muyu-userland/."]
+configuration = ["schema_version = 2, SM8635 device on the sm7675 24A446 OS profile, muyu kit. Patch series is four layers, the shape UniXNU-uke uses: arch:patches/xnu/series (64) + soc:patches/xnu-12377/series (2: sheng-platform-power, native-smp-secondary) + os:patches/xnu/series (4) + device:patches/xnu-27/series (4) = 74. unixnu status --json prints the resolved order, and scripts/audit-27-config.py fails if its own count differs.",
   "105-token boot config identical across u150-u157; u158/u159 drop exactly muyu_usb=1 muyu_usb_panic=1."]
-procedure = ["export UNIXNU_DEVICE=/tmp/spike27 UNIXNU_OUT=/tmp/spike27-out; cd UniXNU-27; ./unixnu build kernel; ./unixnu build payload --data-ramdisk fw/data-seed.img --trust-cache fw/trust-24A446/24A446-original-trust.bundle",
+procedure = ["cd UniXNU; ./unixnu build kernel -D ../UniXNU-muyu; ./unixnu build payload -D ../UniXNU-muyu --data-ramdisk fw/data-seed.img --trust-cache fw/trust-24A446/24A446-original-trust.bundle",
   "python3 UniXNU-muyu/scripts/patch-vendor-boot.py --base /tmp/vendor_boot_base_96m.img --payload <out>/payload/payload.img --output fw/vendor_boot_27-uNNN.img"]
-findings = ["The repo's own board.toml is still the 21H461 iPad7,1 template; the live 27-line config lived only in /tmp/spike27 until archived 2026-11-08 16:05. /tmp deletion changes behaviour (UKE-FULL-WALKTHROUGH finding, still true for board.toml itself).",
+findings = ["The repository builds the 27 line from a clean checkout since 2026-11-08 22:30. Before that the 27-line config lived only in a temp tree, then in a second board file that had to be copied over board.toml; the board was promoted in place and the temp path is no longer a build input.",
   "u152-u159 kernel version strings all read '(u151)': the device source was not bumped after u151; multi-MB image diffs between rounds are consistent with LTO/layout churn plus payload repack, and the u157->u158 delta is exactly 989 bytes (FAT timestamps, random-seed, boot-args region).",
   "Last build (16:13) reports mapping_complete=false, runtime_qualified=false, loadable=false, allow_missing=true, missing AppleARMWatchdogTimer + IOHIDFamily, 26 stub sites, Image4 personality dropped; it was flashed anyway (u159) with no recorded decision.",
-  "CLEANUP 2026-11-08 21:20, restructured 22:05 (maintainer: 'the 27 line is many AIs handing over, keep it clean', then 'follow the 17 line structure'). The 27 line could not build itself from this repo, and four smaller faults hid behind that. (1) The series was declared by the board and here, but had never been committed; patches.py does not glob and does not fall back — it raises 'patch series missing' and stops — so every u-round was built from /tmp/spike27, whose copy of the file existed only in the temp tree. (2) That recovered file pasted the framework patches in as 67 absolute paths plus 5 device patches (72). It has been replaced by the layered form the framework and uke actually use — arch/soc/os/device, each resolved into its own checkout — so the device layer is now only patches/xnu-27/series and nothing in it can fall out of step with the framework. (3) The two lines shared one patch directory, and a schema_version 1 board globs patches/xnu/*.patch: the 27 line's 4 patches were being applied to 17-line kernels, and a 17-line patch parked in a backlog/ subdirectory was silently dropped from them. Split now — patches/xnu/ = 17 line (16 patches, globbed), patches/xnu-27/ = 27 line (4 patches, listed) — and scripts/audit-27-config.py fails if the two overlap or if the series and its directory disagree. (4) native-source-storage=1, -bravearkdeferredconsole and muyu-ignition-trace=1 had no parser in any checkout; the first two are uke's names (-ukedeferredconsole / uke-ignition-trace) and for ignition u44's sysctl two-liner only ever existed in /tmp/spike27, so IPADOS27-MIGRATION §6.58.2 is not reproducible from here. All three are comments now. (5) configs/muyu-27-defconfig never existed; the board names configs/muyu-userland_defconfig. Effect on the kernel: 73 patches instead of u159's 72. The one difference is arm64e-threaded-starts.patch, which the arch layer has carried since and the pasted list missed; the rest is the same set in the framework's own order.",
-  "FRAMEWORK DEVIATION 2026-11-08 21:40: this area says 'Framework UniXNU-27', but the record of what the 16:12 build actually linked (/tmp/spike27-out/.../xnu-patches.list) resolved all 67 compatibility patches through /Users/diannao/pad7pro-xnu/UniXNU/patches/, i.e. the core repo, not UniXNU-27. (Now that the series references layers instead, this is the only remaining source of the difference, and it is a framework-side one.) The two checkouts are no longer identical: offline-owner-boot-manifest.patch, offline-owner-systemos-mount.patch and zzz-boot-progress.patch differ, and the core-repo copies are the newer ones (the UniXNU-27 boot-progress hunk is the older 12-line form). Because the series resolves 'os:' through whichever framework is in use, the same series produces different kernels in the two. scripts/audit-27-config.py reports the divergence; aligning the two checkouts is framework work, not device work."]
+  "CLEANUP 2026-11-08 21:20, restructured 22:05, format 2 22:30 (maintainer: 'the 27 line is many AIs handing over, keep it clean', then 'follow the 17 line structure', then 'the repository is not in the official format'). The 27 line could not build itself from this repo, and four smaller faults hid behind that. (1) The series was declared by the board and here, but had never been committed; patches.py does not glob and does not fall back — it raises 'patch series missing' and stops — so every u-round was built from a temp tree whose copy of the file existed only there. (2) That recovered file pasted the framework patches in as 67 absolute paths plus 5 device patches (72). It has been replaced by the layered form the framework and uke actually use — arch/soc/os/device, each resolved into its own checkout — so the device layer is now only patches/xnu-27/series and nothing in it can fall out of step with the framework. (3) The two lines shared one patch directory, and a schema_version 1 board globs patches/xnu/*.patch: the 27 line's 4 patches were being applied to 17-line kernels, and a 17-line patch parked in a backlog/ subdirectory was silently dropped from them. Split now — patches/xnu/ = 17 line (16 patches, archived with tag line-ipados-17), patches/xnu-27/ = 27 line (4 patches, listed) — and scripts/audit-27-config.py fails if the two overlap or if the series and its directory disagree. (4) native-source-storage=1, -bravearkdeferredconsole and muyu-ignition-trace=1 had no parser in any checkout; the first two are uke's names (-ukedeferredconsole / uke-ignition-trace) and for ignition u44's sysctl two-liner only ever existed in the temp tree, so IPADOS27-MIGRATION §6.58.2 is not reproducible from here. All three are comments now. (5) configs/muyu-27-defconfig never existed; the board names configs/muyu-userland_defconfig. (6) The SoC layer was documented as one patch from a private sm8635 repository while the board actually resolved sm7675 through feeds.toml; the audit now reads soc_source and the count is 2, not 1.",
+  "FRAMEWORK CONSOLIDATION 2026-11-08 22:40, which resolves the deviation recorded at 21:40: the 16:12 build resolved its compatibility patches through the core UniXNU checkout while this record said UniXNU-27, and the two had drifted (offline-owner-boot-manifest, offline-owner-systemos-mount, zzz-boot-progress differ). The fork was unshallowed, merged onto upstream f924843, and the eight 27-line commits that existed only in the old clone were merged in on top, so ../UniXNU is now the one framework for both lines. The old clone is frozen as a reference; the porting audit reports a single checkout and cross-checks its patch count against unixnu status --json."]
 completion = ["defconfig/kernel/payload build completes and the prelinked MH_FILESET kernel.macho is produced; boot config embedded in the payload is machine-readable from the images."]
 limits = ["No manifest/hash verification of the packed image (uke's release/verify step is not used). The unqualified-final-build policy is undocumented."]
-next_action = ["Record why the 16:13 unqualified build was flashed; decide a policy for loadable=false candidates; keep board.spike27-live.toml as the single source and reconcile repo board.toml."]
+next_action = ["Record why the 16:13 unqualified build was flashed; decide a policy for loadable=false candidates; keep board.toml the single board file (the 17 line is a tag, not a second board)."]
 evidence = [
-  { kind = "host", reference = "docs/HANDOFF-2026-11-08.md §3", result = "u158 = u157 + 989 bytes: FAT timestamps + chosen random-seed + boot-args region removing muyu_usb/muyu_usb_panic", command = "python3 diff-clusters vendor_boot_27-u157.img vendor_boot_27-u158.img", revision = "images fw/vendor_boot_27-u157.img 27507b1e... / u158 0bf6ba5f..." },
-  { kind = "host", reference = "kernel/kernel.json", result = "kernelcache_sha256 38e6d9fa... equals the uke-recorded 24A446 member; candidate 95,764,480 B sha256 7b083c24..., loadable=false", command = "cat /tmp/spike27-out/muyu/ipados-27.0.1-24A446/muyu-27/kernel/kernel.json", revision = "2026-11-08 16:13 build" },
-  { kind = "host", reference = "board.spike27-live.toml", result = "byte-identical to /tmp/spike27/board.toml at archive time", command = "diff /tmp/spike27/board.toml UniXNU-muyu/board.spike27-live.toml", revision = "2026-11-08 16:05" },
+  { kind = "host", reference = "docs/HANDOFF-2026-11-08.md", result = "u158 = u157 + 989 bytes: FAT timestamps + chosen random-seed + boot-args region removing muyu_usb/muyu_usb_panic; recorded images fw/vendor_boot_27-u157.img 27507b1e... / u158 0bf6ba5f... [§3]", command = "python3 diff-clusters vendor_boot_27-u157.img vendor_boot_27-u158.img", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
+  { kind = "host", reference = "docs/HANDOFF-2026-11-08.md", result = "kernelcache_sha256 38e6d9fa... equals the uke-recorded 24A446 member; candidate 95,764,480 B sha256 7b083c24..., loadable=false; recorded 2026-11-08 16:13 build [artefact: kernel/kernel.json]", command = "cat out/muyu/ipados-27.0.1-24A446/muyu-userland/kernel/kernel.json", revision = "0000000000000000000000000000000000000000" },
+  { kind = "source", reference = "board.toml", result = "format 2 board promoted in place: schema_version = 2, soc_source = sm7675, os_profile = ipados-27.0.1-24A446, four-layer patch_series" },
 ]
 
 [[area]]
@@ -55,14 +61,14 @@ completion = ["UEFI menu boots the payload entry from vendor_boot on this device
 limits = ["UEFI firmware itself is not rebuilt by the current flow; no verify step; 'firmware' here means the boot path, not a re-qualified FD build."]
 next_action = ["Regenerate boot.img from Mu-Silicium sources once, record its sha, and add it to the ledger as a build step rather than a reused artifact."]
 evidence = [
-  { kind = "device", reference = "logs/flash-ledger.tsv", result = "hundreds of preflight+flash vendor_boot+boot rows with rc=0 through 2026-11-08", command = "grep -c preflight logs/flash-ledger.tsv", revision = "u159 2026-11-08T08:14:20Z" },
+  { kind = "device", reference = "docs/HANDOFF-2026-11-08.md", result = "hundreds of preflight+flash vendor_boot+boot rows with rc=0 through 2026-11-08; recorded u159 2026-11-08T08:14:20Z [artefact: logs/flash-ledger.tsv]", command = "grep -c preflight logs/flash-ledger.tsv", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
 id = "cpu"
 status = "implemented"
 components = ["ArmCpu"]
-paths = ["board.spike27-live.toml"]
+paths = ["board.toml"]
 inputs = ["Boot args sheng-smp=0 armcpu-spi-ipi=0 (present in every u150-u159 image)."]
 configuration = ["Single-CPU runs; the SPI-IPI path and the SMP-enable isolation experiment from the uke audit (§4) have not been executed on muyu."]
 procedure = ["Flash any u15x image; the panel log shows the scheduler running single-core."]
@@ -71,27 +77,29 @@ completion = ["Single-CPU boots are stable enough to reach APFS/owner-cache stag
 limits = ["No multi-core run on the 27 line; no SMP stability data on this SoC for 24A446."]
 next_action = ["Run the one isolation experiment (smp=1, spi-ipi=0) once the observability channel is trustworthy."]
 evidence = [
-  { kind = "host", reference = "fw/vendor_boot_27-u159.img", result = "args contain sheng-smp=0 armcpu-spi-ipi=0", command = "extract boot-config TOML from the payload", revision = "u159" },
+  { kind = "host", reference = "docs/HANDOFF-2026-11-08.md", result = "args contain sheng-smp=0 armcpu-spi-ipi=0; recorded u159 [artefact: fw/vendor_boot_27-u159.img]", command = "extract boot-config TOML from the payload", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
 id = "memory"
-status = "unknown"
+status = "planned"
 components = ["ArmDTPlatform"]
-paths = []
-inputs = ["Boot arg kt_fixed_zones=120 present in the active config."]
-configuration = ["No dedicated memory bring-up findings recorded in any handoff or STATUS for the 27 line."]
-procedure = ["(none recorded)"]
-findings = ["No structured record exists for memory bring-up on muyu; the 17-line port boots without documented memory work, which is evidence only that the inherited braveark SM8635 layout works, not a qualification."]
-completion = []
-limits = ["Nothing measured: no owned-memory figure, no bank map check, no jetsam observation on the 27 line."]
-next_action = ["Fill this area from the next instrumented boot once the screen channel is trustworthy: the painted page carries the build tag and the previous panic, so a single photograph is enough evidence."]
+paths = ["board.toml", "docs/ABANDONED-CHANNELS.md"]
+inputs = ["board.toml [kernel.prelink] carries owned_memory_size = 0x130000000 (4.75 GiB) and dram_size = 0x80000000, the SMEM RAM table value read from the device.",
+  "Boot arg kt_fixed_zones=120 in the active config; no bank map, no jetsam or zone-growth observation has been recorded for either line."]
+configuration = ["The kernel is given one owned-memory window; the rest of the physical map is governed by the device tree the payload generator compiles from dts/muyu.dts."]
+procedure = ["Build the payload, boot, and read the owned-memory figure the kernel prints next to the page-table setup; compare it with 0x130000000."]
+findings = ["Nothing is measured. The 17 line boots with this window, which says the inherited braveark SM8635 layout is not obviously wrong, not that it is qualified.",
+  "The 3 GiB and 2 GiB windows were tried on the 17 line and neither fixed the boot-task timeout (board.toml comment next to owned_memory_size); the window was returned to 4.75 GiB without a memory-side explanation."]
+completion = ["The owned-memory window the kernel reports equals the board's value on the 27 line, and one boot records the page-table size it implies."]
+limits = ["No owned-memory figure, no bank map check and no jetsam observation on the 27 line: this area is planned, not implemented."]
+next_action = ["Take the owned-memory line off the first trustworthy screen capture once the screen channel is re-planted (docs/SCREEN-ONLY.md §4), then record it here with the commit it was read at."]
 evidence = []
 
 [[area]]
 id = "storage"
 status = "device-verified"
-components = ["ShengUfs", "NativeUfs", "apfs", "SoftwareAES"]
+components = ["ShengUfs", "RamBlock", "VirtioMmioBlock", "VerifiedRoot", "AppleKeyStoreState", "SoftwareAES"]
 paths = ["docs/IPADOS27-MIGRATION.md", "docs/ABANDONED-CHANNELS.md §3 (the Linux reader these observations came from was removed 2026-11-08)"]
 inputs = ["SHNGROOT container on userdata: windows OS + SystemOS (sparse images fw/userdata-root-preboot*.sparse, 8.74-15.2 GiB variants, five flashes 2026-11-03..11-06 per ledger).",
   "Persistent Data: packed_data_ramdisk/persistent_data/sheng-data-persist=2; data-seed.img (DBRDISK1, 1.04 MiB) is only the first-boot seed.",
@@ -106,8 +114,8 @@ completion = ["OS/SystemOS windows authenticate, APFS mounts the SystemCryptex, 
 limits = ["Cryptex contents not yet composed into the owner cache (0/0); Data-only-read-only tension with cryptex staging unresolved."]
 next_action = ["Compose the owner cache from the enumerated cryptex files; keep the Data layout decision (reset policy) explicit per boot."]
 evidence = [
-  { kind = "device", reference = "logs/2026-11-08-14-36-26-878.jpg", result = "panel shows NativeUfs OS volume ready + apfs mount of SystemCryptex + owner-cache enumeration", command = "photo transcription in docs/HANDOFF-2026-11-08.md §5", revision = "u155, flashed 2026-11-08T06:35:19Z" },
-  { kind = "device", reference = "HANDOFF-2026-11-07.md §25", result = "u110: store Resumed across boot, 91->147 pages, boot reached dirs_cleaner", command = "flash fw/vendor_boot_27-u110-family image", revision = "u110 2026-11-07" },
+  { kind = "device", reference = "docs/HANDOFF-2026-11-08.md", result = "panel shows NativeUfs OS volume ready + apfs mount of SystemCryptex + owner-cache enumeration; recorded u155, flashed 2026-11-08T06:35:19Z [artefact: logs/2026-11-08-14-36-26-878.jpg]", command = "photo transcription in docs/HANDOFF-2026-11-08.md §5", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
+  { kind = "device", reference = "docs/HANDOFF-2026-11-07.md", result = "u110: store Resumed across boot, 91->147 pages, boot reached dirs_cleaner; recorded u110 2026-11-07 [§25]", command = "flash fw/vendor_boot_27-u110-family image", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
@@ -125,13 +133,13 @@ completion = ["Boot state is observable end-to-end via panel photographs at 60 H
 limits = ["CPU composition only; no DPU direct scanout, no GPU compositor on the 27 line; panel drops exec-path prints."]
 next_action = ["Keep the readout format; paint the previous panic as the first boot screen (docs/SCREEN-ONLY.md §4, BravearkLastLog replay) so panics before video are not lost. The pstore line-dump was the other candidate and is abandoned."]
 evidence = [
-  { kind = "device", reference = "logs/2026-11-08-14-36-26-878.jpg", result = "full-screen 56-row readout with round tag u155", command = "photograph after flash", revision = "u155" },
+  { kind = "device", reference = "docs/HANDOFF-2026-11-08.md", result = "full-screen 56-row readout with round tag u155; recorded u155 [artefact: logs/2026-11-08-14-36-26-878.jpg]", command = "photograph after flash", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
 id = "input"
 status = "device-verified"
-components = ["NativeNovatekTouch", "ShengHidInput"]
+components = ["ShengNovatekTouch", "ShengHidInput"]
 paths = ["docs/TOUCH-PORT.md"]
 inputs = ["Novatek touch controller on GENI SPI 0xa90000 (NVT-ts-spi); physical buttons."]
 configuration = ["muyu-touch-drv=1 muyu-touch-quiet=1 sheng-touch-hid=1 muyu-buttons=1 (active in all u15x rounds)."]
@@ -142,13 +150,13 @@ completion = ["Touch and buttons produce events into IOHIDFamily on the 17-line 
 limits = ["No touch interaction has been demonstrated on the 27 line (userland never reached a UI there)."]
 next_action = ["Re-verify touch on the 27 line once userland reaches backboardd."]
 evidence = [
-  { kind = "device", reference = "STATUS.md", result = "Novatek touch (muyu-touch-drv=1) works as native IOService; physical buttons work", command = "on-device use, October sessions", revision = "21H461 line" },
+  { kind = "device", reference = "STATUS.md", result = "Novatek touch (muyu-touch-drv=1) works as native IOService; physical buttons work; recorded 21H461 line", command = "on-device use, October sessions", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
 id = "gpu"
 status = "implemented"
-components = ["ShengGmu", "MuyuRpmhRsc"]
+components = ["Adreno740", "AdrenoPM4", "AdrenoFirmware"]
 paths = ["docs/GPU-CLIFFS-MMIO.md", "docs/GPU-PROBE-RUNBOOK.md", "docs/GPU-GEN7-START-REGLIST.md", "docs/GPU-UKE-ALIGNMENT.md"]
 inputs = ["GMU firmware chip id 0x070b0000 recovered from the CM3 image (catalog formula gives 0x4303b000, rejected FW_INIT_RESULT=0x901).",
   "Board OPP/BCM policy generated from the device's own downstream devicetree, 11 GPU levels 1100->255 MHz.",
@@ -164,42 +172,42 @@ completion = ["GMU firmware runs and answers HFI on hardware; nothing past GX po
 limits = ["No CP, no command submission, no Metal on muyu; ACD and IFPC off; ShengGmu poll caps at 10 ms; GPLL0 GPU vote does not stick."]
 next_action = ["GPU stays paused; if resumed, first collect the probe-17 on-device readout that is still owed."]
 evidence = [
-  { kind = "device", reference = "docs/GPU-PROBE-RUNBOOK.md §11", result = "cold=0 ph=7 proto=0 fw=0x00000100 hfi=0x00000001, repeated every run", command = "probe modes 7-11 with the GPU probe images", revision = "2026-10-30" },
-  { kind = "host", reference = "docs/GPU-PROBE-RUNBOOK.md §12 + STATUS.md", result = "CFG_GDSCR bit16 never sets; parent is RPMh ARC voter; RSC sender host-tested", command = "python3 scripts/check-muyu-rpmh-host.py", revision = "probe 17" },
+  { kind = "device", reference = "docs/GPU-PROBE-RUNBOOK.md", result = "cold=0 ph=7 proto=0 fw=0x00000100 hfi=0x00000001, repeated every run; recorded 2026-10-30 [§11]", command = "probe modes 7-11 with the GPU probe images", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
+  { kind = "host", reference = "docs/GPU-PROBE-RUNBOOK.md", result = "CFG_GDSCR bit16 never sets; parent is RPMh ARC voter; RSC sender host-tested; recorded probe 17 [§12 + STATUS.md]", command = "python3 scripts/check-muyu-rpmh-host.py", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
 id = "network"
 status = "not-applicable"
 components = []
-paths = []
-inputs = []
-configuration = []
-procedure = []
-findings = ["No network work on either line; WiFi was only ever a uke-side topic (uke branch fix/wifi-apple-cache-20261108)."]
-completion = []
-limits = ["No intent to bring network up in the current spike."]
-next_action = []
+paths = ["board.toml"]
+inputs = ["No Wi-Fi, Bluetooth or modem component is selected in board.toml [components]; the SM7675 SoC layer ships none either."]
+configuration = ["Nothing to configure: [components] include has no Ath12kWifi (or any other network) entry, so no driver is built and no firmware is listed in proprietary-files.txt."]
+procedure = ["Nothing to run. Adding network means selecting the component, adding its firmware to proprietary-files.txt and recording the result here, in that order."]
+findings = ["No network work on either line; Wi-Fi was only ever a uke-side topic (uke branch fix/wifi-apple-cache-20261108)."]
+completion = ["Not-applicable for this port as published: the area becomes applicable the day a network component is selected."]
+limits = ["No intent to bring network up in the current spike; the not-applicable status is a decision, not a gap."]
+next_action = ["Keep it out of the board until the boot path is stable; revisit after the owner cache composes."]
 evidence = []
 
 [[area]]
 id = "audio"
 status = "not-applicable"
 components = []
-paths = []
-inputs = []
-configuration = []
-procedure = []
+paths = ["board.toml"]
+inputs = ["No audio component is selected in board.toml [components], and the 24A446 profile ships no audio kext for this SoC."]
+configuration = ["Nothing to configure: no codec, no I2S/SoundWire controller and no audio firmware in proprietary-files.txt."]
+procedure = ["Nothing to run. Enabling audio means a component entry, its firmware and a recorded device result, in that order."]
 findings = ["No audio work on either line; uke records the same not-applicable."]
-completion = []
-limits = []
-next_action = []
+completion = ["Not-applicable for this port as published."]
+limits = ["Out of scope for the current spike; the limitation is scope, not hardware evidence."]
+next_action = ["Revisit only after display and storage reach a stable desktop."]
 evidence = []
 
 [[area]]
 id = "power"
 status = "host-verified"
-components = ["MuyuRpmhRsc", "CpuFreqProbe"]
+components = ["ArmCpu"]
 paths = ["package/MuyuRpmhRsc.h", "package/MuyuRpmhRsc.c", "package/MuyuRpmhRscHostTests.c", "docs/THERMAL-PORT.md"]
 inputs = ["ARC votes: gfx.lvl selector from init level 0x10, mxc.lvl from 0x30; single ACTIVE TCS transfer (probe mode 17).",
   "Thermal facts: TSENS survey built (muyu-thermal=<n>), not yet run; DT real trips 95 degC GPU, 110 degC CPU, reset-mon 115 degC.",
@@ -212,13 +220,13 @@ completion = ["Host-verified: RSC transfer encoding and TSENS register map; noth
 limits = ["No thermal policy, no throttle, no emergency action; the tablet can overheat during bring-up — keep sessions short and the charger monitored."]
 next_action = ["Run the read-only TSENS survey once (thermal1 image); it is one flash and zero risk relative to the USB work."]
 evidence = [
-  { kind = "host", reference = "STATUS.md + docs/THERMAL-PORT.md", result = "RSC sender host-tested; TSENS survey written and built, not run; wdt=-1 in every u15x image", command = "python3 scripts/check-muyu-rpmh-host.py; extract args from u159", revision = "u159 args" },
+  { kind = "host", reference = "STATUS.md", result = "RSC sender host-tested; TSENS survey written and built, not run; wdt=-1 in every u15x image; recorded u159 args [+ docs/THERMAL-PORT.md]", command = "python3 scripts/check-muyu-rpmh-host.py; extract args from u159", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]
 
 [[area]]
 id = "packaging"
 status = "implemented"
-components = ["XnuPrelink", "patch-vendor-boot.py"]
+components = ["XnuPrelink", "DarwinBoot"]
 paths = ["scripts/patch-vendor-boot.py", "logs/flash-ledger.tsv"]
 inputs = ["Payload FAT volume with kernel.macho + ADT + trust cache + optional data seed; stock vendor_boot template; stock init_boot header (used only by the reader images, since removed — docs/ABANDONED-CHANNELS.md)."]
 configuration = ["Manual pipeline replaces uke's release/pack/verify: build kernel -> build payload -> patch-vendor-boot.py -> tools/muyu-flash-mode.sh; every flash/boot/restore is ledgered with sha256 (2651 rows)."]
@@ -230,14 +238,14 @@ completion = ["Round-trip build->flash->ledger works and is auditable after the 
 limits = ["No hash verification of packed output; two pipelines (boot=UEFI fd, vendor_boot=payload) with the firmware one stale since 11-05."]
 next_action = ["Add a post-pack sha256 manifest (uke's release verify equivalent) and wire boot.img regeneration into the same flow."]
 evidence = [
-  { kind = "host", reference = "logs/flash-ledger.tsv", result = "restore rows at 2026-11-08T08:18:44-49Z with stock shas bf68c1be.../69f1e38c.../c40dcb96...", command = "grep restore logs/flash-ledger.tsv", revision = "ledger head 2651 rows" },
-  { kind = "host", reference = "docs/ABANDONED-CHANNELS.md §3", result = "14:59 ABL-recovery fallback measured for the self-made header; stock init_boot header adopted in v4 (reader since removed)", command = "python3 build-initboot-reader.py --template fw/stock/init_boot.img ...", revision = "v4 2026-11-08 15:26; removed 2026-11-08 21:xx" },
+  { kind = "host", reference = "docs/HANDOFF-2026-11-08.md", result = "restore rows at 2026-11-08T08:18:44-49Z with stock shas bf68c1be.../69f1e38c.../c40dcb96...; recorded ledger head 2651 rows [artefact: logs/flash-ledger.tsv]", command = "grep restore logs/flash-ledger.tsv", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
+  { kind = "host", reference = "docs/ABANDONED-CHANNELS.md", result = "14:59 ABL-recovery fallback measured for the self-made header; stock init_boot header adopted in v4 (reader since removed); recorded v4 2026-11-08 15:26; removed 2026-11-08 21:xx [§3]", command = "python3 build-initboot-reader.py --template fw/stock/init_boot.img ...", revision = "3ad15a9c23fbf73224f2ce1a827b22fa6c774028" },
 ]
 
 [[area]]
 id = "diagnostics"
 status = "device-verified"
-components = ["video_console screen engine (muyu_vc_*)", "drivers/MuyuDebug (console ring)", "USB CDC ACM + Linux/pstore readers — removed 2026-11-08"]
+components = ["MuyuDebug"]
 paths = ["docs/SCREEN-ONLY.md", "docs/ABANDONED-CHANNELS.md", "drivers/MuyuDebug/", "patches/xnu/wip/muyu-screen-wip-20261108.patch", "HANDOFF-2026-11-07.md §47-§60"]
 inputs = ["Stock kernel facts (measured 2026-11-08): CONFIG_DEVTMPFS off, CONFIG_VT off (panel unusable from Linux), CONFIG_DEVMEM off, CONFIG_PSTORE_CONSOLE on -> ramoops at 0xa7000000 readable by the XNU payload.",
   "DWC3 facts (u136-u150): GEVNTADRHI accepts the 37 GB ring (awidth=64 real); DEPSTARTCFG completes; DEPCFG accepted but never starts; DCTL.CSFTRST never self-clears (u141 3000, u147 20000 tries); reading GCC GDSCR stalls the bus (u134) and GDSCR is an absolute address, not base+offset (u135).",
@@ -256,7 +264,7 @@ completion = ["Framebuffer log pages give full boot context from a single photog
 limits = ["No real-time channel; information is capped by panel area (~230x40 chars per page) and requires a person to photograph; nothing is machine-readable; event ordering relies on tick numbers printed on the page; a dark panel loses everything, so the pram panic page is the lifeline."]
 next_action = ["Per docs/SCREEN-ONLY.md §4, port back instead of designing new: set CONFIG_XNU_BOOT_PROGRESS=y + CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y on the 27 defconfig, relink BootProgress/BootUiTraceProbe/BravearkLastLog/MuyuCrashLog from kits/muyu via the existing build-native-legacy-display.py and build-boot-log.py, put sheng-build-tag on the vendor_boot cmdline, then run the check-boot-*.py suite as the flash gate. (The files.arm64 USB registration was already dropped with the driver on 2026-11-08 — the wip screen patch now registers only muyu_debug.c.)"]
 evidence = [
-  { kind = "device", reference = "HANDOFF-2026-11-07.md §60 + logs/2026-11-08-14-36-26-878.jpg", result = "DEPCFG 16 probes accepted 0 executed (panel table); DCTL.CSFTRST never self-clears; framebuffer readout works", command = "flash u155, photograph panel", revision = "u150-u155" },
-  { kind = "host", reference = "docs/SCREEN-ONLY.md §2", result = "screen API surface enumerated (block/glyph/bigchar/status/logdump/textdump/pram_bigpage/bar/protected/bounded lock) at video_console.c:1314-1769", command = "grep -nE '^muyu_vc_[a-z_]+\\(' osfmk/console/video_console.c", revision = "ac9718f + working tree 2026-11-08 15:59" },
-  { kind = "source", reference = "drivers/MuyuDebug/ + patches/xnu/wip/muyu-screen-wip-20261108.patch", result = "the entire screen capability (which lived only in tree/.cache/xnu-work, 126 uncommitted changes) is now archived in the device repo: 4 source files + 2453-line patch over 7 files", command = "git diff HEAD -- osfmk/console/video_console.c pexpert/arm/pe_init.c bsd/conf/files.arm64 bsd/dev/arm/muyu_*.c", revision = "2026-11-08 17:31" },
+  { kind = "device", reference = "docs/HANDOFF-2026-11-07.md", result = "DEPCFG 16 probes accepted 0 executed (panel table); DCTL.CSFTRST never self-clears; framebuffer readout works; recorded u150-u155 [§60 + logs/2026-11-08-14-36-26-878.jpg]", command = "flash u155, photograph panel", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
+  { kind = "host", reference = "docs/SCREEN-ONLY.md", result = "screen API surface enumerated (block/glyph/bigchar/status/logdump/textdump/pram_bigpage/bar/protected/bounded lock) at video_console.c:1314-1769; recorded ac9718f + working tree 2026-11-08 15:59 [§2]", command = "grep -nE '^muyu_vc_[a-z_]+\\(' osfmk/console/video_console.c", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
+  { kind = "source", reference = "drivers/MuyuDebug/muyu_debug.c", result = "the entire screen capability (which lived only in tree/.cache/xnu-work, 126 uncommitted changes) is now archived in the device repo: 4 source files + 2453-line patch over 7 files; recorded 2026-11-08 17:31 [+ patches/xnu/wip/muyu-screen-wip-20261108.patch]", command = "git diff HEAD -- osfmk/console/video_console.c pexpert/arm/pe_init.c bsd/conf/files.arm64 bsd/dev/arm/muyu_*.c", revision = "714179fd56cf909e3725e9c6681eb76fa253075b" },
 ]

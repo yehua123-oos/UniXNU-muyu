@@ -62,7 +62,7 @@
 
 同时改的：`patches/xnu/wip/muyu-screen-wip-20261108.patch` 去掉 `muyu_usb_debug.c` 与
 `muyu_usb_protocol.h` 两个整文件段及 `files.arm64` 注册行；`scripts/legacy-10063/build-xnu-4k-baseline.sh`
-去掉 `libMuyuUsbDebug.a` 的 force_load 钩子；`board.toml` / `board.spike27-live.toml` 去掉
+去掉 `libMuyuUsbDebug.a` 的 force_load 钩子；`board.toml` 去掉
 `muyu_usb=1`、`muyu_usb_panic=1`、`muyu-usb-panic-at=<s>` 三组启动参数（本来就只是注释）。
 
 **注意 `muyu_pstore.c` 与本仓的 `sheng-log` 不是一回事。** 前者是被删的 debug 补丁里的
