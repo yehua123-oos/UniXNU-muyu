@@ -111,16 +111,20 @@ u151. See `docs/BUILD-NAMING.md`:
 python3 scripts/build-tag.py next --purpose scr --note "what this round is for"
 ```
 
-Then, for the 27 line:
+Then build. One framework checkout (`UniXNU`), and the output directory is the resolver's —
+`out/muyu/<os_profile>/<config>/`:
 
 ```bash
-cd UniXNU-27 && python3 unixnu build kernel -D ../UniXNU-muyu \
+cd UniXNU && python3 unixnu defconfig muyu-userland_defconfig -D ../UniXNU-muyu
+python3 unixnu build kernel -D ../UniXNU-muyu \
     --kernelcache out/ipsw/24A446/kernelcache.decompressed
-python3 unixnu build payload -D ../UniXNU-muyu --kernel out/muyu/kernel/kernel.macho \
+python3 unixnu build payload -D ../UniXNU-muyu \
+    --kernel out/muyu/ipados-27.0.1-24A446/muyu-userland/kernel/kernel.macho \
     --unique-chip-id 0000000000000001 --owner-trust-cache /tmp/muyu-static-system.bundle \
     --data-ramdisk ../fw/data-seed/muyu-data-200g.dbr
 python3 ../UniXNU-muyu/scripts/patch-vendor-boot.py --base ../fw/vendor_boot_lite.img \
-    --payload out/muyu/payload/payload.img --output ../fw/vendor_boot_muyu.img
+    --payload out/muyu/ipados-27.0.1-24A446/muyu-userland/payload/payload.img \
+    --output ../fw/vendor_boot_muyu.img
 ```
 
 Before trusting a 27-line build, run the hygiene gate. It exists because this line was carried by
@@ -135,7 +139,18 @@ nothing parses (the option does nothing). `STATUS.md` lists what each check catc
 python3 scripts/audit-27-config.py          # exit 1 on a disconnect
 ```
 
-For the 17 line the same three steps run with `--kernelcache out/ipsw/21H461/kernelcache.decompressed`.
+Two official checks run on every push as well:
+
+```bash
+python3 ../UniXNU/scripts/porting-record.py check --device .   # 13 structured areas
+```
+
+`.github/workflows/porting-record.yml` runs the same command in CI. The board is format 2 and the
+record matches it, which is what the device catalog reads to publish a record page instead of a
+bare repository link.
+
+The 17 line is archived (tag `line-ipados-17`); `docs/IPADOS17-ARCHIVE.md` has its build commands and
+what would bring it back into `board.toml`.
 
 Requirements: unlocked bootloader, a wall charger for the experiments, and a full
 stock ROM for recovery. The iPadOS root image is **not** part of this repository.
