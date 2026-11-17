@@ -20,6 +20,31 @@ print(run(['python3',ROOT/'scripts/audit-mobile-graphics-legacy.py'],text=True),
 audit=json.loads((ROOT/'build/display-analysis/mobile-graphics-legacy-abi.json').read_text())
 print(run(['python3',ROOT/'scripts/audit-mobile-graphics-default-surface.py'],text=True),end='')
 pure=audit['abstract_slots'];methods=audit['methods']
+# Target-kernel-specific original addresses. These are the exact virtual addresses
+# of the original IOMobileFramebufferLegacy code/data in the linked candidate for
+# THIS board's kernel (24A446 here). They are verification anchors the build
+# asserts against the candidate; they are NOT in the audit JSON. To re-align to
+# another kernel (e.g. 21H461) regenerate them from that target's candidate via
+# the legacy-audit tooling and drop them here, or set the 'target_abi' key of the
+# audit JSON to override any of them.
+TARGET_ABI = {
+    'ctor': 0xfffffff0057865cc, 'dtor': 0xfffffff005786618,
+    'gmetaclass': 0xfffffff006b35940,
+    'ctor_call': 0xfffffff0057865fc, 'dtor_call': 0xfffffff005786630,
+    'protected_c2_base': 0xfffffff00577b510, 'protected_d2_base': 0xfffffff00577b55c,
+    'start_hardware_pc': 0xfffffff005787ef8,
+    'slot295_pc': 0xfffffff005795b88, 'slot295_check_pc': 0xfffffff005795b98,
+    'completion_report_pc': 0xfffffff00578aa7c, 'is_main_display_pc': 0xfffffff005777e9c,
+    'vsync_notify': 0xfffffff005796720, 'set_refresh_properties': 0xfffffff00579ebb8,
+    'default_surface_port': 0xfffffff00578b390, 'surface_copy_port_name': 0xfffffff004baa90c,
+    'surface_descriptor': 0xfffffff004b9ead0, 'surface_width': 0xfffffff004b9ebbc,
+    'surface_height': 0xfffffff004b9ebc4, 'surface_stride': 0xfffffff004b9ebd4,
+    'surface_allocation': 0xfffffff004b9ebfc, 'surface_format': 0xfffffff004b9ebac,
+    'surface_planes': 0xfffffff004b9ebf4,
+}
+_abij = audit.get('target_abi')
+if isinstance(_abij, dict):
+    TARGET_ABI.update({k: int(v, 16) if isinstance(v, str) else v for k, v in _abij.items()})
 header='''// SPDX-License-Identifier: BSD-2-Clause-Patent
 // Opaque ABI storage for the exact original class, not source-level access
 // to its private fields. The actual original metadata supplies its full
@@ -110,9 +135,9 @@ old=candidate.read_bytes();old_image=macho(old)
 names={n:v for v,group in exports(old,old_image).items() for n in group}
 def read(va,n):
     at=backed_offset(old_image['segments'],va,n,len(old));return old[at:at+n]
-bindings={'__ZN25IOMobileFramebufferLegacyC2EPK11OSMetaClass':0xfffffff0057865cc,
-          '__ZN25IOMobileFramebufferLegacyD2Ev':0xfffffff005786618,
-          '__ZN25IOMobileFramebufferLegacy10gMetaClassE':0xfffffff006b35940,
+bindings={'__ZN25IOMobileFramebufferLegacyC2EPK11OSMetaClass':TARGET_ABI['ctor'],
+          '__ZN25IOMobileFramebufferLegacyD2Ev':TARGET_ABI['dtor'],
+          '__ZN25IOMobileFramebufferLegacy10gMetaClassE':TARGET_ABI['gmetaclass'],
           '__ZTV25IOMobileFramebufferLegacy':int(audit['legacy_vptr'],16)-16}
 owned=[];native=[]
 for i,name in enumerate(compiled):
@@ -133,18 +158,18 @@ require(undefined==set(bindings),'All and only actual original-class imports qua
 # The default-surface port fallback calls the original slot242 and the original
 # surface -> Mach-port helper. They are not original-class imports, so bind
 # their exact addresses after the class-import assertion.
-bindings['_native_legacy_vsync_notify']=0xfffffff005796720
-bindings['_native_legacy_set_refresh_properties']=0xfffffff00579ebb8
-bindings['_uke_original_default_surface_port']=0xfffffff00578b390
-bindings['_uke_surface_copy_port_name']=0xfffffff004baa90c
+bindings['_native_legacy_vsync_notify']=TARGET_ABI['vsync_notify']
+bindings['_native_legacy_set_refresh_properties']=TARGET_ABI['set_refresh_properties']
+bindings['_uke_original_default_surface_port']=TARGET_ABI['default_surface_port']
+bindings['_uke_surface_copy_port_name']=TARGET_ABI['surface_copy_port_name']
 # Exact original IOSurface getters, independently observed through the real
 # original swap request. These aliases call original code; no object layout
 # is substituted and no original method/vtable is patched.
 for name,address,field,wide in [
-    ('descriptor',0xfffffff004b9ead0,48,True),('width',0xfffffff004b9ebbc,88,True),
-    ('height',0xfffffff004b9ebc4,96,True),('stride',0xfffffff004b9ebd4,104,True),
-    ('allocation',0xfffffff004b9ebfc,144,True),('format',0xfffffff004b9ebac,128,False),
-    ('planes',0xfffffff004b9ebf4,152,False)]:
+    ('descriptor',TARGET_ABI['surface_descriptor'],48,True),('width',TARGET_ABI['surface_width'],88,True),
+    ('height',TARGET_ABI['surface_height'],96,True),('stride',TARGET_ABI['surface_stride'],104,True),
+    ('allocation',TARGET_ABI['surface_allocation'],144,True),('format',TARGET_ABI['surface_format'],128,False),
+    ('planes',TARGET_ABI['surface_planes'],152,False)]:
     expected=(0xf9400000 if wide else 0xb9400000)|((field//(8 if wide else 4))<<10)
     require(read(address,8)==struct.pack('<2I',expected,0xd65f03c0),'Exact original surface getter '+name)
     bindings['_native_legacy_surface_'+name]=address
@@ -152,21 +177,21 @@ for name,address,field,wide in [
 def branch(pc):
     word=struct.unpack('<I',read(pc,4))[0];require(word&0xfc000000==0x94000000,'Actual protected base call')
     value=word&0x3ffffff;return pc+4*(value-(1<<26) if value&(1<<25) else value)
-require(branch(0xfffffff0057865fc)==0xfffffff00577b510 and branch(0xfffffff005786630)==0xfffffff00577b55c,
+require(branch(TARGET_ABI['ctor_call'])==TARGET_ABI['protected_c2_base'] and branch(TARGET_ABI['dtor_call'])==TARGET_ABI['protected_d2_base'],
         'Original protected Legacy C2/D2 really call their original Service bases')
 # Actual caller passes only self at slot 288 and tests bit zero of w0.
-require(read(0xfffffff005787ef8,16)==bytes.fromhex('080040f9088144f900013fd6e0000037'),
+require(read(TARGET_ABI['start_hardware_pc'],16)==bytes.fromhex('080040f9088144f900013fd6e0000037'),
         'Original bool start_hardware() call and result check')
 getter=int(methods[249]['address'],16)
 for offset,field in [(0x30,5808),(0x58,5812)]:
     require(struct.unpack('<I',read(getter+offset,4))[0]==0xb9400000|((field//4)<<10)|(8<<5)|8,
             'Actual original width/height getter fields')
-require(int(methods[295]['address'],16)==0xfffffff005795b88 and
-        read(0xfffffff005795b98,16)==bytes.fromhex('e00740f9280080520101001272d3ff97'),
+require(int(methods[295]['address'],16)==TARGET_ABI['slot295_pc'] and
+        read(TARGET_ABI['slot295_check_pc'],16)==bytes.fromhex('e00740f9280080520101001272d3ff97'),
         'Actual original slot-295 passes true to the normal current completion body')
-require(read(0xfffffff00578aa7c,24)==bytes.fromhex('080040f9084545f9030080d2e20303aa0400805200013fd6'),
+require(read(TARGET_ABI['completion_report_pc'],24)==bytes.fromhex('080040f9084545f9030080d2e20303aa0400805200013fd6'),
         'Original completion calls optional report slot 337 with null outputs and zero limit')
-require(read(0xfffffff005777e9c,16)==bytes.fromhex('080040f908e142f900013fd6c0000036'),
+require(read(TARGET_ABI['is_main_display_pc'],16)==bytes.fromhex('080040f908e142f900013fd6c0000036'),
         'Original isMainDisplay dispatch uses only self and tests boolean bit zero')
 asm=OUT/'original-bindings.S';asm.write_text(''.join(f'.globl {name}\n.set {name}, {va:#x}\n' for name,va in sorted(bindings.items())))
 sdk=run(['xcrun','--sdk','iphoneos','--show-sdk-path'],text=True).strip()
@@ -235,12 +260,21 @@ muyu_touch_cpp=ROOT/'kits/muyu/TouchProbeMuyu.cpp';muyu_touch_obj=touch_dir/'Tou
 # GENI SPI and Novatek protocol objects; only the driver runs by default (muyu-touch-drv=1).
 nvt_driver_cpp=ROOT/'drivers/ShengNovatekTouch/NativeNovatekTouch.cpp';nvt_driver_obj=touch_dir/'ShengNovatekTouch.o'
 cpufreq_cpp=ROOT/'kits/muyu/CpuFreqProbe.cpp';cpufreq_obj=touch_dir/'CpuFreqProbe.o'
-# uke first-console: NATIVE_ADRENO is off, so the sheng GpuPowerProbe's Adreno and
-# GPU-addon imports would be undefined; omit it from this archive until the Adreno kit
-# is linked. muyu's own probe (below) deliberately has no Adreno dependency.
+# uke first-console (historical): the sheng GpuPowerProbe was omitted because NATIVE_ADRENO
+# was off and its Adreno / GPU-addon imports would be undefined. That no longer holds for the
+# 17 line: muyu-userland_defconfig has CONFIG_XNU_NATIVE_ADRENO=y, libAdreno740.a is linked
+# (-force_load) and native_adreno_publish / native_gpu_addon_stage are all present in the kernel.
+# It is compiled back in below (see the Metal publisher block); its extern "C" driver imports are
+# weak anyway, so a build without the Adreno kit would report "nolink" instead of failing to link.
 run([str(touch_cpp) if str(arg)==str(source) else str(touch_cpp_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
 run([str(cpufreq_cpp) if str(arg)==str(source) else str(cpufreq_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
 run([str(muyu_touch_cpp) if str(arg)==str(source) else str(muyu_touch_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
+# USB layer probe (package/UsbPhyProbe.cpp): muyu-usb-probe=<s>. Read-only survey of the USB30 power
+# domain (gcc_usb30_prim_gdsc / gcc_usb3_phy_gdsc), the DWC3 core and the eUSB2 PHY, so the next
+# gadget attempt starts from "which layer is dead" instead of re-deriving it. Compiled into this
+# archive so the weak import in LegacyDisplayProbe.cpp resolves; inert without the boot argument.
+usbphy_cpp=ROOT/'kits/muyu/UsbPhyProbe.cpp';usbphy_obj=touch_dir/'UsbPhyProbe.o'
+run([str(usbphy_cpp) if str(arg)==str(source) else str(usbphy_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
 # muyu's own gated GPUCC/GCC/SMMU observation (package/MuyuGpuPowerProbe.cpp): muyu-gpu-power=<n>. Unlike the
 # sheng GpuPowerProbe below it has no Adreno imports, so it links without the Adreno kit; it only maps the
 # windows and runs the host-tested sequence from MuyuGpuPowerBoard.h.
@@ -295,6 +329,17 @@ for _src in cold_sources:
     _obj=cold_dir/(_src.stem+'.o');cold_objs.append(_obj)
     run([str(_src) if str(arg)==str(process_source) else str(_obj) if str(arg)==str(process_obj) else arg for arg in process_cmd]+gmu_include,cwd=pr['directory'])
 run([str(gpupower_cpp) if str(arg)==str(source) else str(gpupower_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]+gmu_include,cwd=r['directory'])
+# Metal publisher / full Adreno bring-up (package/GpuPowerProbe.cpp), default-off behind
+# sheng-gpu-power=<n> (+ sheng-gpu-metal=1 for publishMetal()). Its strong sheng_gpu_power_probe()
+# overrides the weak empty stub in LegacyDisplayStubs.c, and LegacyDisplayProbe.cpp:507 already
+# calls that entry point, so no new caller is needed. This file owns both missing halves of the
+# publication chain (GPU-HANDOFF.md §11.8/§11.9): publishMetal() registers AGXAccelerator with
+# MetalPluginName, and publishAndWrapperTest() supplies the VM/submit/ring/clock arguments to
+# native_adreno_publish() so g.published becomes true. Both are gated, so an ordinary boot is inert.
+sheng_gpupower_cpp=ROOT/'kits/muyu/GpuPowerProbe.cpp';sheng_gpupower_obj=touch_dir/'GpuPowerProbe.o'
+sheng_include=gmu_include+['-I',str(ROOT/'drivers/Adreno740'),'-I',str(ROOT/'kits/AdrenoPM4'),'-I',str(ROOT/'kits/muyu')]
+run([str(sheng_gpupower_cpp) if str(arg)==str(source) else str(sheng_gpupower_obj)
+     if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]+sheng_include,cwd=r['directory'])
 # The driver lives in drivers/ShengNovatekTouch but needs the GENI SPI library and the board headers;
 # give it those two include directories explicitly instead of relative paths through symlinked trees.
 nvt_include=['-I',str(ROOT/'drivers/QcomGeniSpi'),'-I',str(ROOT/'kits/muyu')]
@@ -329,11 +374,11 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
 require(code((keyevents/'AppleKeyStoreState.o').read_bytes(),macho((keyevents/'AppleKeyStoreState.o').read_bytes()))==
         code(keyevents_late.read_bytes(),macho(keyevents_late.read_bytes())),'Owned event-service instructions unchanged by late init staging')
 run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',hid_obj,keystore_obj,process_obj,trace_obj,
-     hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o',keyevents_late,touch_cpp_obj,cpufreq_obj,muyu_touch_obj,gpupower_obj,gmu_fw_obj,adreno_fw_obj,nvt_driver_obj,data_probe_obj,button_obj,stub_obj,*touch_objs,*smmu_objs,*cold_objs])
+     hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o',keyevents_late,touch_cpp_obj,cpufreq_obj,muyu_touch_obj,gpupower_obj,sheng_gpupower_obj,gmu_fw_obj,adreno_fw_obj,nvt_driver_obj,usbphy_obj,data_probe_obj,button_obj,stub_obj,*touch_objs,*smmu_objs,*cold_objs])
 sources=[ROOT/'drivers/GopFramebuffer/NativeLegacyDisplay.cpp',
          ROOT/'drivers/GopFramebuffer/NativeLegacyRequest.h',source,hid_source,keystore_source,process_source,trace_source,ROOT/'kits/muyu/BootUiTraceCore.h',ROOT/'kits/muyu/BootUiTraceDetails.h',
          ROOT/'drivers/ShengHidInput/NativeHidInput.cpp',ROOT/'scripts/build-native-hid-input.py',
-         ROOT/'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',touch_cpp,cpufreq_cpp,muyu_touch_cpp,gpupower_cpp,ROOT/'kits/muyu/MuyuGpuPowerBoard.h',gmu_fw_c,adreno_fw_c,ROOT/'drivers/ShengNovatekTouch/NativeNovatekTouch.cpp',ROOT/'drivers/ShengNovatekTouch/NativeNovatekTouch.h',ROOT/'kits/muyu/TouchBoardMuyu.h',ROOT/'kits/muyu/TouchBoard.h',stub_source,
+         ROOT/'drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp',touch_cpp,cpufreq_cpp,muyu_touch_cpp,gpupower_cpp,sheng_gpupower_cpp,ROOT/'kits/muyu/GpuPowerBoard.h',ROOT/'kits/muyu/MuyuGpuPowerBoard.h',gmu_fw_c,adreno_fw_c,ROOT/'drivers/ShengNovatekTouch/NativeNovatekTouch.cpp',ROOT/'drivers/ShengNovatekTouch/NativeNovatekTouch.h',ROOT/'kits/muyu/TouchBoardMuyu.h',ROOT/'kits/muyu/TouchBoard.h',stub_source,
          ROOT/'drivers/QcomGeniSpi/GeniSpi.c',ROOT/'drivers/QcomGeniSpi/GeniSpi.h',ROOT/'drivers/ShengNovatekTouch/NvtProtocol.c',
          ROOT/'drivers/ShengNovatekTouch/NvtProtocol.h',ROOT/'drivers/ShengNovatekTouch/NvtTouchCore.c',ROOT/'drivers/ShengNovatekTouch/NvtTouchCore.h',
          ROOT/'kits/muyu/MuyuGmuSmmu.c',ROOT/'kits/muyu/MuyuGmuSmmu.h',ROOT/'kits/muyu/ShengGpuSmmu.c',ROOT/'kits/muyu/ShengGpuSmmu.h',*smmu_sources,

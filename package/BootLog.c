@@ -38,6 +38,9 @@ extern int native_ufs_log_write(uint64_t, uint32_t, const void *) __attribute__(
 extern uint64_t native_ufs_export_blocks(void) __attribute__((weak));
 extern int native_ufs_export_write(uint64_t, uint32_t, const void *) __attribute__((weak));
 extern int native_ufs_log_sync(void) __attribute__((weak));
+// What the bounded log write saw (drivers/ShengUfs: hostWrite4k gives up after 100 ms instead of sleeping on the shared host lock).
+extern uint32_t native_ufs_log_lock_stalls(void) BOOT_LOG_OPTIONAL;
+extern uint32_t native_ufs_log_lock_stall_ms(void) BOOT_LOG_OPTIONAL;
 extern unsigned native_ufs_store_gpt_check(void) __attribute__((weak));
 extern uint32_t cs_text_fixup_parsed __attribute__((weak));
 extern uint32_t cs_text_fixup_applied __attribute__((weak));
@@ -139,6 +142,10 @@ extern int boot_reset_probe(char *, unsigned) BOOT_LOG_OPTIONAL;
 extern int boot_reset_bootloader(char *, unsigned) BOOT_LOG_OPTIONAL;
 extern int boot_reset_mark_bootloader(char *, unsigned) BOOT_LOG_OPTIONAL;
 extern int boot_reset_watchdog(uint32_t, char *, unsigned) BOOT_LOG_OPTIONAL;
+// 1 = the watchdog's ping thread was cut short (this board); 0 = no watchdog thread, so the caller must use PSCI or nothing.
+extern int boot_reset_wdt_hurry(void) BOOT_LOG_OPTIONAL;
+// fix159: one explicit Gunyah ping from the per-second tick thread; 0 = no watchdog glue on this board.
+extern int boot_reset_wdt_ping(void) BOOT_LOG_OPTIONAL;
 extern volatile uint64_t native_adreno_import_diag[10] __attribute__((weak));
 extern volatile uint32_t native_adreno_import_stage __attribute__((weak));
 extern volatile uint64_t native_adreno_import_live[3 + 8 * 4] __attribute__((weak));
@@ -150,8 +157,14 @@ static char boot_log_reset_probe_text[240], boot_log_reset_result[120], boot_log
 struct boot_log_msgbuf {int msg_magic, msg_size, msg_bufx, msg_bufr; char *msg_bufc;};
 extern struct boot_log_msgbuf *msgbufp;
 
-enum {LogBlock = 4096, LogMsgFirst = 1, LogMsgBlocks = 32, LogSlotFirst = 33, LogSlotBlocks = 16, LogPeriodMs = 2000, LogMaxErrors = 3,
-      LogExportStage = 64};   // export bytes staged per write: 256 KiB
+// LogMsgBlocks is the kernel message buffer's capacity in the window: 256 blocks = 1 MiB, the largest the BSD ring can be
+// (bsd/sys/msgbuf.h MAX_MSG_BSIZE, subr_log.c log_setsize). The boot argument msgbuf=1048576 raises the ring to match;
+// without it the ring stays at its default and only the tail of that fits, which is exactly what a 32-block window held.
+enum {LogBlock = 4096, LogMsgFirst = 1, LogMsgBlocks = 256, LogSlotFirst = 257, LogSlotBlocks = 16,
+      LogPeriodMs = 2000,
+      // 3 was for a dead medium. With bounded writes a give-up is now also what a busy UFS looks like, and three of those in a row
+      // would end the record exactly when the system got interesting: 30 consecutive failures (a minute) still means dead.
+      LogMaxErrors = 30, LogExportStage = 64};   // export bytes staged per write: 256 KiB
 struct boot_log_header {
   char magic[8];                 // "SHLOG001"
   uint32_t version, header_bytes;
@@ -166,12 +179,29 @@ struct boot_log_header {
   uint32_t export_below;
   // version 4: the diagnostic file export (BootDiagExport.c) at block diag_first of the export region, diag_bytes long (0 = none)
   uint32_t diag_first, diag_bytes;
+  // version 5. uptime_s above counts from the writer thread's start, and that thread does not run until the kernel is ~90 s in
+  // (NativeUfs has to match first), so it is not the number the msgbuf timestamps use. kernel_uptime_s is that number: the
+  // same clock as the "[ 123.456789]:" prefixes, so "log covers up to kernel_uptime_s" is now a statement about the kernel.
+  // msg_blocks is the number of blocks actually written this round (the tail of the region holds an older, longer round).
+  uint32_t kernel_uptime_s;
+  // Milliseconds the round spent on the medium, last and worst. A round that blocks for tens of seconds is why the log
+  // stopped at 174 s on fix25 while the device kept running: the writer was inside a write, not dead.
+  uint32_t write_ms_last, write_ms_max;
 };
 // Writer state for the board page: 0 off, 1 waiting for the window, 2 writing, 3 stopped after errors, 4 stopped (GPT changed).
 volatile uint32_t boot_log_state, boot_log_rounds, boot_log_errors;
 volatile uint64_t boot_log_first_lba;
 static int boot_log_started;
+// Shared by the writer loop and boot_log_tick. fix10 showed why the deadline cannot live in the loop alone: the medium writes stopped at
+// 122 s and the next round blocked until 183 s, so a 90 s deadline fired 93 s late. boot_log_tick runs once a second from the board page's
+// monitor, which does not depend on the medium, so it is the reliable place to notice the deadline.
+static uint32_t boot_log_autoreset;
+// fix159: the per-second tick thread reads tried/ok from another thread, so they must not be cached.
+static volatile int boot_log_reset_ok, boot_log_reset_tried;
+static uint32_t boot_log_tick_count;   // diagnostic: how many times boot_log_tick has run
+static int boot_log_tick_started;      // 1 = the per-second tick thread exists, -1 = creation failed
 static uint8_t *boot_log_buffer;   // LogMsgBlocks blocks: the message buffer, then reused for a slot and the header
+static uint32_t boot_log_seen_stalls;   // the driver's give-up count last reported into msgbuf
 
 // The export: boot_log_export_put takes the blob's pieces in order (any thread) and writes them through a staging buffer straight into
 // the half of the export region that does not hold the last complete blob; once the last piece is on the medium that blob becomes the
@@ -309,6 +339,15 @@ static uint32_t copy_msgbuf(uint8_t *out) {
   return n;
 }
 
+// The clock behind the msgbuf "[ 123.456789]:" prefixes. The board page tags every kprintf line with CNTPCT/cntfrq, which counts from
+// power-on (UEFI included), so this must be the raw counter and not clock_get_uptime: that one starts at the kernel's own boot and
+// reported 3 s on fix26 while the same round's msgbuf already reached 174 s. With this, header and msgbuf are directly comparable.
+static uint32_t kernel_uptime_s(void) {
+  uint64_t f = 0; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); if (!f) f = 19200000;
+  uint64_t c = 0; __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(c));
+  return (uint32_t)(c / f);
+}
+
 static void writer(void *arg, wait_result_t result) {
   (void)arg; (void)result;
   thread_set_thread_name(current_thread(), "boot_log");
@@ -330,7 +369,7 @@ static void writer(void *arg, wait_result_t result) {
   struct boot_log_header h;
   memset(&h, 0, sizeof h);
   memcpy(h.magic, "SHLOG001", 8);
-  h.version = 4; h.header_bytes = sizeof h;
+  h.version = 5; h.header_bytes = sizeof h;
   h.export_blocks = export_region; h.export_below = export_region; h.boot_id = log_ticks(); h.first_lba = first; h.window_blocks = (uint32_t)blocks;
   h.msg_first = LogMsgFirst; h.msg_blocks = LogMsgBlocks; h.slot_first = LogSlotFirst; h.slot_blocks = LogSlotBlocks; h.slot_count = slot_count;
   h.gpt_open = h.gpt_last = &native_ufs_store_gpt_check ? native_ufs_store_gpt_check() : 0xff;
@@ -338,29 +377,45 @@ static void writer(void *arg, wait_result_t result) {
   uint64_t f = 0; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); if (!f) f = 19200000;
   const uint64_t start = log_ticks();
   // The reboot-into-fastboot path, read only: PSCI features and the PMIC cell. sheng-autoreset=<seconds of log time> then writes the cell and
-  // restarts once, after that round's log is on the medium, but only when the probe found the cell writable.
-  uint32_t autoreset = 0;
-  int reset_ok = 0, reset_tried = 0;
-  if (&boot_reset_probe) {
-    reset_ok = boot_reset_probe(boot_log_reset_probe_text, sizeof boot_log_reset_probe_text) == 0;
-    PE_parse_boot_argn("sheng-autoreset", &autoreset, sizeof autoreset);
-  }
+  // restarts once, after that round's log is on the medium, but only when the probe found the cell writable. The probe issues this kernel's
+  // first SMC calls, so it runs from the loop after a round is on the medium (see reset_probed below) rather than here: if the call hangs,
+  // the log up to that point still exists and the missing [reset] line is itself the answer.
+  int reset_probed = 0;
   // sheng-diag-export=<seconds of log time>: export the diagnostic files once then (set it shortly before sheng-autoreset).
   uint32_t diag_at = 0;
   if (&boot_diag_scan && &boot_diag_stream) PE_parse_boot_argn("sheng-diag-export", &diag_at, sizeof diag_at);
   uint32_t errors = 0;
   boot_log_state = 2;
   for (;;) {
-    const unsigned now = (unsigned)((log_ticks() - start) / f);
+    const uint64_t round_start = log_ticks();
+    const unsigned now = (unsigned)((round_start - start) / f);
     int ok = 1;
     // Text slot, then the message buffer, then the header that makes both visible.
     memset(boot_log_buffer, 0, LogSlotBlocks * LogBlock);
     compose((char *)boot_log_buffer, LogSlotBlocks * LogBlock, h.slots_written, now);
     ok &= native_ufs_log_write(LogSlotFirst + (uint64_t)(h.slots_written % slot_count) * LogSlotBlocks, LogSlotBlocks, boot_log_buffer);
     h.msg_bytes = copy_msgbuf(boot_log_buffer);
-    ok &= native_ufs_log_write(LogMsgFirst, LogMsgBlocks, boot_log_buffer);
+    // Only the blocks that hold text. A fixed 1 MiB every 2 s is 512 KiB/s through this emulated UFS, and on fix25 the round after
+    // the 174 s mark never came back from a write, which is what ended the record while the device kept running. The first round
+    // still writes the whole region so a longer earlier round's tail cannot be read as this one's.
+    const uint32_t used_blocks = (h.msg_bytes + LogBlock - 1) / LogBlock;
+    h.msg_blocks = boot_log_rounds || !used_blocks ? LogMsgBlocks : used_blocks;
+    ok &= native_ufs_log_write(LogMsgFirst, h.msg_blocks, boot_log_buffer);
     if (ok) ++h.slots_written;
     else ++h.write_errors;
+    // What the medium cost, before the header goes down: a round that blocks for tens of seconds shows up here as write_ms_max.
+    const uint32_t spent_ms = (uint32_t)((log_ticks() - round_start) / (f / 1000));
+    h.write_ms_last = spent_ms;
+    if (spent_ms > h.write_ms_max) h.write_ms_max = spent_ms;
+    // Whether this round lost the host lock to the guest's own I/O, which is the other explanation for a record that stops early.
+    if (&native_ufs_log_lock_stalls) {
+      const uint32_t stalls = native_ufs_log_lock_stalls();
+      if (stalls != boot_log_seen_stalls) {
+        boot_log_seen_stalls = stalls;
+        printf("[log] ufs lock: %u give-ups, worst wait %u ms\n", stalls,
+               &native_ufs_log_lock_stall_ms ? native_ufs_log_lock_stall_ms() : 0);
+      }
+    }
     // The newest complete export is already on the medium; the header names it.
     IOLockLock(export_lock);
     h.export_generation = export_ready; h.export_bytes = export_ready_bytes; h.export_first = export_ready_first;
@@ -372,7 +427,10 @@ static void writer(void *arg, wait_result_t result) {
       if (kernel_thread_start_priority(diag_thread, NULL, MINPRI_KERNEL, &diag) == KERN_SUCCESS) thread_deallocate(diag);
       else boot_diag_status = -10;
     }
-    h.uptime_s = now; h.rounds = ++boot_log_rounds; h.state = boot_log_state;
+    // uptime_s counts from this thread's start; kernel_uptime_s is the same clock the msgbuf timestamps use, so a reader can say
+    // how far into the kernel's life this snapshot reaches without knowing when NativeUfs happened to match.
+    h.uptime_s = now; h.kernel_uptime_s = kernel_uptime_s();
+    h.rounds = ++boot_log_rounds; h.state = boot_log_state;
     // Every 30 rounds the GPT is read back; any change stops the writer for good.
     if (&native_ufs_store_gpt_check && !(h.rounds % 30)) h.gpt_last = native_ufs_store_gpt_check();
     memset(boot_log_buffer, 0, LogBlock);
@@ -382,41 +440,115 @@ static void writer(void *arg, wait_result_t result) {
     if (!ok) {boot_log_errors = ++errors;} else errors = 0;
     if (errors >= LogMaxErrors) {boot_log_state = 3; return;}
     if (h.gpt_last != h.gpt_open) {boot_log_state = 4; return;}
-    if (autoreset && now >= autoreset && !reset_tried && ok) {
-      reset_tried = 1;
-      if (!reset_ok) strlcpy(boot_log_reset_result, "autoreset skipped: the probe found no writable cell", sizeof boot_log_reset_result);
-      else {
-        // The text is only readable if the reset is refused; on success the tablet restarts into fastboot.
+    // One round is on the medium, so the reset probe can run without cost to the record: it only reads (PSCI version, the arbiter's
+    // version and the SDAM's APID owner) and writes nothing. The autoreset trigger below then has its answer in the same round.
+    if (!reset_probed && h.rounds >= 1) {
+      reset_probed = 1;
+      if (&boot_reset_probe) {
+        boot_log_reset_ok = boot_reset_probe(boot_log_reset_probe_text, sizeof boot_log_reset_probe_text) == 0;
+        printf("[reset] probe: %s\n", boot_log_reset_probe_text);
+        PE_parse_boot_argn("sheng-autoreset", &boot_log_autoreset, sizeof boot_log_autoreset);
+      }
+    }
+    // boot_log_tick usually fires this first (it is not blocked by the medium); this copy stays for the boots where the monitor's tick
+    // is the one that stalls, and boot_log_reset_tried keeps the two from both running.
+    if (boot_log_autoreset && now >= boot_log_autoreset && !boot_log_reset_tried && ok) {
+      boot_log_reset_tried = 1;
+      if (!boot_log_reset_ok) strlcpy(boot_log_reset_result, "autoreset skipped: the probe found no writable cell", sizeof boot_log_reset_result);
+      else if (&boot_reset_wdt_hurry && boot_reset_wdt_hurry()) {
+        // The 2026-11-13 probe settled it: PSCI is v1.1 here but SYSTEM_RESET and both SYSTEM_RESET2 variants answer 0, so
+        // boot_reset_bootloader() would write the cell and then call an SMC that does nothing. The restart belongs to the
+        // hypervisor watchdog armed by boot_log_tick, whose timeout boot_reset_wdt_hurry pulls down to 1 s.
+        strlcpy(boot_log_reset_result, "autoreset: pings stopped, the watchdog restarts", sizeof boot_log_reset_result);
+      } else {
+        // Boards whose PSCI does implement SYSTEM_RESET keep the direct path.
         int rc = boot_reset_bootloader(boot_log_reset_result, sizeof boot_log_reset_result);
         char tail[24]; snprintf(tail, sizeof tail, " (returned %d)", rc);
         strlcat(boot_log_reset_result, tail, sizeof boot_log_reset_result);
       }
+      // Into msgbuf as well as the struct: the boots of 2026-11-13 ended before anything read the struct back.
+      printf("[reset] %s\n", boot_log_reset_result);
     }
     IOSleep(LogPeriodMs);
   }
 }
 
 // Called by the board page's monitor once a second; starts the writer the first time when sheng-log=1.
+// fix159: on this board that monitor never called again - the only call site (LegacyDisplayProbe.cpp:541)
+// passes a constant 0 exactly once - so the deadline below could never fire and sheng-autoreset had no
+// effect on the observation window. The per-second caller is now the dedicated thread defined below.
+static void log_tick_thread(void *, wait_result_t);
 void boot_log_tick(unsigned now) {
-  (void)now;
+  // fix159 diagnostic: prove the per-second caller is alive and show which clock the deadline sees.
+  boot_log_tick_count = boot_log_tick_count + 1u;
+  if ((boot_log_tick_count % 30u) == 0u)
+    printf("[log] tick %us n=%u deadline=%u tried=%d\n", now, boot_log_tick_count,
+           boot_log_autoreset, boot_log_reset_tried);
+  // The deadline is watched here first: this runs once a second from the board page's monitor, which does not touch the medium, and on
+  // fix10 the writer loop's own copy of the same check fired 93 s late because the writes had stopped and the round had blocked.
+  if (boot_log_autoreset && now >= boot_log_autoreset && !boot_log_reset_tried && boot_log_reset_ok) {
+    boot_log_reset_tried = 1;
+    if (&boot_reset_wdt_hurry && boot_reset_wdt_hurry()) {
+      strlcpy(boot_log_reset_result, "autoreset: pings stopped, the watchdog restarts", sizeof boot_log_reset_result);
+      printf("[reset] %s (tick %us)\n", boot_log_reset_result, now);
+    }
+  }
   if (boot_log_started) return;
   boot_log_started = 1;
   // An unattended run must come back however it ends: on the desktop past its deadline (int-229 first suspected) or in a panic seconds
   // after the start, before UFS and this log exist (int-229: a duplicate class at PE_lockdown_iokit). So the first tick, independent of
   // sheng-log, marks the cell (any restart is fastboot) and arms the hypervisor's watchdog, which bites a minute after the pings stop:
   // after the autoreset deadline, or when a panic parks the cores.
-  uint32_t autoreset = 0;
-  if (PE_parse_boot_argn("sheng-autoreset", &autoreset, sizeof autoreset) && autoreset && &boot_reset_probe &&
-      boot_reset_probe(boot_log_reset_probe_text, sizeof boot_log_reset_probe_text) == 0) {
-    if (&boot_reset_mark_bootloader) boot_reset_mark_bootloader(boot_log_reset_mark, sizeof boot_log_reset_mark);
-    if (&boot_reset_watchdog) boot_reset_watchdog(autoreset + 60, boot_log_reset_watchdog, sizeof boot_log_reset_watchdog);
+  if (PE_parse_boot_argn("sheng-autoreset", &boot_log_autoreset, sizeof boot_log_autoreset) && boot_log_autoreset && &boot_reset_probe) {
+    boot_log_reset_ok = boot_reset_probe(boot_log_reset_probe_text, sizeof boot_log_reset_probe_text) == 0;
+    if (boot_log_reset_ok) {
+      if (&boot_reset_mark_bootloader) boot_reset_mark_bootloader(boot_log_reset_mark, sizeof boot_log_reset_mark);
+      if (&boot_reset_watchdog) boot_reset_watchdog(boot_log_autoreset, boot_log_reset_watchdog, sizeof boot_log_reset_watchdog);
+      // fix166: these two texts were composed but never printed, so a refused set-time was indistinguishable from an external reset.
+      // Output only - no behaviour, no ordering change; the sole behavioural variable of this round stays GunyahWdtTimeoutMs.
+      printf("[reset] mark: %s | watchdog: %s\n", boot_log_reset_mark, boot_log_reset_watchdog);
+    }
+  }
+  // fix159: start the per-second caller here, after the watchdog is armed but before the sheng-log
+  // early returns below (a build without UFS logging still needs the autoreset deadline to work).
+  if (!boot_log_tick_started && &boot_reset_wdt_ping) {
+    boot_log_tick_started = 1;
+    thread_t tick_thread;
+    if (kernel_thread_start_priority(log_tick_thread, NULL, BASEPRI_REALTIME, &tick_thread) == KERN_SUCCESS)
+      thread_deallocate(tick_thread);
+    else boot_log_tick_started = -1;
   }
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("sheng-log", &mode, sizeof mode) || mode != 1) return;
   if (!&native_ufs_log_open || !&native_ufs_log_write || !&native_ufs_log_sync) return;
+  // 1 MiB at the time this runs (the UFS driver is up, so the allocator has pages); keep a plain-contiguous fallback so a
+  // failed aligned allocation cannot cost us the log entirely - the writer only memcpy's out of this buffer.
   boot_log_buffer = (uint8_t *)IOMallocAligned(LogMsgBlocks * LogBlock, LogBlock);
+  if (!boot_log_buffer) boot_log_buffer = (uint8_t *)IOMalloc(LogMsgBlocks * LogBlock);
   if (!boot_log_buffer) return;
   export_lock = IOLockAlloc();
   thread_t thread;
-  if (kernel_thread_start_priority(writer, 0, BASEPRI_KERNEL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+  // BASEPRI_REALTIME, not the kernel default: fix26 measured the medium at 3 ms a round (write_ms=3/9), so the writer was not slow, it
+  // stopped being run. Once SpringBoard starts spinning on this emulated CPU the round never comes back and the record ends at 174 s
+  // while the device runs to 203 s. A realtime thread asleep 2 s out of every 2.01 leaves the system alone and still gets the turn.
+  if (kernel_thread_start_priority(writer, 0, BASEPRI_REALTIME, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+}
+
+// fix159: the "board page monitor calls boot_log_tick once a second" that BootLog.c has always assumed.
+// It uses the raw CNTPCT/cntfrq clock - the same one behind the msgbuf "[ 123.456789]:" prefixes - so
+// sheng-autoreset=<seconds of log time> means what it says, independent of when NativeUfs happened to
+// publish the window. The hypervisor's watchdog timeout is only 1 s, so ping every 200 ms (5x margin,
+// the same period the original wdt_thread uses) and only call boot_log_tick once a second. Once the
+// deadline has fired, boot_log_reset_tried stops the pings and wdt_hurry() pulls the timeout to 1 s,
+// so the restart follows the deadline instead of the ~178 s ping-thread stall seen in fix157/fix158.
+static void log_tick_thread(void *arg, wait_result_t wr) {
+  (void)arg; (void)wr;
+  thread_set_thread_name(current_thread(), "boot_log_tick");
+  unsigned n = 0;
+  for (;;) {
+    if (!boot_log_reset_tried && &boot_reset_wdt_ping) boot_reset_wdt_ping();
+    n = n + 1u;
+    if (n >= 5u) {n = 0; boot_log_tick(kernel_uptime_s());}
+    IOSleep(200);
+  }
 }

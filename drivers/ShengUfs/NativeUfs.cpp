@@ -1252,13 +1252,18 @@ extern "C" int native_ufs_log_write (uint64_t rel, uint32_t blocks, const void *
   if (!gLogRegionBlocks || !src || !blocks || rel >= gLogRegionBlocks || blocks > gLogRegionBlocks - rel) return 0;
   while (blocks) {
     uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
-    if (hostWrite4k (0, gLogRegionFirst + rel, chunk, src) != kIOReturnSuccess) return 0;
+    // Bounded: the diagnostic log must never be the thing that hangs. A give-up is a lost round, not a lost boot.
+    if (hostWrite4k (0, gLogRegionFirst + rel, chunk, src, false, 100) != kIOReturnSuccess) return 0;
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
   }
   return 1;
 }
+
+// What the bounded log write saw: how many rounds gave up waiting for the shared host lock, and the longest wait survived.
+extern "C" uint32_t native_ufs_log_lock_stalls (void) { return gHostLockStalls; }
+extern "C" uint32_t native_ufs_log_lock_stall_ms (void) { return gHostLockStallMs; }
 
 // The export region below the log window: its size in blocks once the log is open, else 0; writes at a block offset inside it.
 extern "C" uint64_t native_ufs_export_blocks (void) { return gLogRegionBlocks ? kExportBlocks : 0; }

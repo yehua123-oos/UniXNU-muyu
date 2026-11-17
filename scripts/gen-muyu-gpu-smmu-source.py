@@ -24,7 +24,30 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def board_root():
+    # Resolve the board repository (UniXNU-muyu) regardless of where this script lives.
+    candidate = ROOT / 'kits' / 'muyu'
+    if candidate.is_symlink():
+        return candidate.resolve().parent
+    br = ROOT / 'UniXNU-muyu'
+    if (br / 'board.toml').is_file():
+        return br
+    return ROOT
+
+
+def fw_root():
+    # Harvested firmware / devicetrees live in the shared fw/ checkout beside the board repository.
+    br = board_root()
+    fw = br / 'fw'
+    if fw.is_dir():
+        return fw
+    shared = br.parent / 'fw'
+    if shared.is_dir():
+        return shared
+    return fw
 PLATFORM_SCRIPT = "gen-muyu-gpu-platform.py"
 
 
@@ -34,15 +57,15 @@ def sha(path):
 
 def main(argv):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(ROOT / "UniXNU-muyu/build/gpu"))
-    ap.add_argument("--dtb", default=str(ROOT / "fw/stock/dtb_3.dtb"))
-    ap.add_argument("--vendor-source", default=str(ROOT / "fw/android-harvest/vendor-source"))
+    ap.add_argument("--out", default=str(board_root() / "build/gpu"))
+    ap.add_argument("--dtb", default=str(fw_root() / "stock/dtb_3.dtb"))
+    ap.add_argument("--vendor-source", default=str(fw_root() / "android-harvest/vendor-source"))
     args = ap.parse_args(argv[1:])
 
     # Regenerate the platform description so this header always matches the DTB it cites.
-    subprocess.run([sys.executable, str(ROOT / "UniXNU-muyu/scripts" / PLATFORM_SCRIPT), "--dtb", args.dtb],
+    subprocess.run([sys.executable, str(board_root() / "scripts" / PLATFORM_SCRIPT), "--dtb", args.dtb],
                    check=True, capture_output=True)
-    platform_path = ROOT / "UniXNU-muyu/build/gpu/muyu-gpu-platform.json"
+    platform_path = board_root() / "build/gpu/muyu-gpu-platform.json"
     platform = json.loads(platform_path.read_text())
     smmu = platform["smmu"]
     base, size = smmu["regions"]["base"]["base"], smmu["regions"]["base"]["size"]

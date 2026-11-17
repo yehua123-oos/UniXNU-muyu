@@ -67,6 +67,10 @@ extern "C" {
 #include "NativeAdrenoCpInit.h"
 #include "NativeAdrenoPwrup.h"
 #include "NativeAdrenoA740HwInit.h"
+/* muyu is Adreno 735 (gen7-11-0, 1.5 MiB GMEM, family ADRENO_7XX_GEN2).
+ * The harvested a7xx_catalog.c assigns a740_hwcg to every GEN2 entry and
+ * a730_hwcg only to GEN1; the generated "MuyuA735Hwcg" table was the GEN1
+ * a730 set (gmu_chipid 0x07110000), not this board's family. */
 #include "AdrenoPM4.h"
 // Weak: an image that does not link NativeAdreno reports "nolink" instead of failing to link.
 extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu, size_t bytes, unsigned bank, unsigned asid,
@@ -86,8 +90,35 @@ extern "C" ShengGmuStatus ShengGmuBindMmio(ShengGmuMmio *, ShengGmuIo *) __attri
 extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]) __attribute__((weak));
 extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *, size_t, unsigned, unsigned, unsigned, unsigned, unsigned,
     unsigned, void (*)(uint32_t), NativeAdrenoGmuContextReport *) __attribute__((weak));
-extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5]) __attribute__((weak));
+// GpuBufferCount (currently 11) comes from NativeAdrenoGpuContext.h. The framework driver's
+// NativeAdrenoGpuContextBuffers() fills every slot, so an older [5] declaration both mismatched
+// the prototype (-Warray-parameter under -Werror) and overflowed the caller's array.
+extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[GpuBufferCount]) __attribute__((weak));
 extern "C" NativeAdrenoVm *NativeAdrenoGpuContextVm() __attribute__((weak));
+/* The SMMU's real input size (ID2.UBS, 32/36/40/42/44/48), i.e. the aperture the GPU context bank was programmed with. The published
+ * service must carry this number: NativeAdrenoPublish sizes every user connection's address window as 2^input_bits - GpuClientVaStart,
+ * so a literal that does not match makes 0 bytes of window and newUserClient refuses every open with kIOReturnNoResources. */
+extern "C" unsigned NativeAdrenoGpuContextInputBits() __attribute__((weak));
+/* Read by the console dump: [0] input bits published, [1] output bits published. (A bare `extern "C" unsigned x[2];` is only a
+ * declaration, so the definition carries the initialiser.) */
+extern "C" unsigned muyu_gpu_bits[2] = {0, 0};
+/* Read by the console dump: the Metal bridge's last streamed line, which is where "PUB no device: <why>" lands. */
+extern "C" char muyu_gpu_reason[64] = {0};
+/* fix211 (2026-11-16 20:1x): every archived round prints "Initiating vnode jetsam : 1024 desired" and parks at ~1950
+ * numvnodes (3692 occurrences across the whole log archive, never a different number). 1024 is exactly what
+ * bsd/dev/unix_startup.c:212 computes when sane_size is smaller than 64 KiB:
+ *     desiredvnodes = (int)(sane_size / 65536) + 1024;      and vntblinit() then sets numvnodes_max = desiredvnodes * 2
+ * parametrised by kern.vn_dealloc_level, i.e. a 2048-vnode table on a machine with ~4 GB of usable pages. On a healthy
+ * boot of this memory size desiredvnodes lands near 66k. A 2k table means every process that maps its own binaries
+ * competes for vnodes, which is what the jetsam storms, the "ufs lock: N give-ups" lines and the 160 s frame-producer
+ * stall all sit inside. These four globals are read-only here, printed once, so one boot says whether sane_size really
+ * collapsed and what the RAM actually is (max_mem_actual), without touching any code path. */
+/* vm_param.h is pulled in above without an extern "C" wrapper, so a plain extern "C" redeclaration here is a language-
+ * linkage conflict. Bind fresh C++-side names to the C symbols instead; the asm label is the Mach-O name the C side emits. */
+extern uint64_t muyu_probe_sane_size __asm__("_sane_size");
+extern uint64_t muyu_probe_max_mem __asm__("_max_mem_actual");
+extern int      muyu_probe_desiredvnodes __asm__("_desiredvnodes");
+extern long     muyu_probe_numvnodes __asm__("_numvnodes");
 extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
     const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t, uint32_t) __attribute__((weak));
 extern "C" uint32_t native_adreno_publish_stats(uint32_t *) __attribute__((weak));
@@ -126,12 +157,37 @@ extern "C" volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8], armcpu_gi
 extern "C" IOService *native_adreno_published_service() __attribute__((weak));
 extern "C" const uint8_t native_adreno_sqe_firmware_image[] __attribute__((weak));
 extern "C" const uint64_t native_adreno_sqe_firmware_image_size __attribute__((weak));
-extern "C" const uint8_t native_adreno_zap_image[] __attribute__((weak));
-extern "C" const uint64_t native_adreno_zap_image_size __attribute__((weak));
+/* fix152: embed THIS board's zap shader. The 17 line used to link a weak empty default
+ * (size 0), so zapAndSecure() returned Z-1 and the GPU never left secure mode. The board's DT
+ * declares a "zap-shader" node on qcom,adreno-gpu-gen7-11-0 and the harvested image is
+ * fw/gpu-firmware/gen71100_zap.mbn (12088 B) - NOT the A740 zap that sheng/uke's
+ * build-native-adreno-kits.py would embed. MuyuZapFirmware.inc is generated from that blob.
+ * Strong definitions win over any weak default left elsewhere in the link. */
+extern "C" const uint8_t native_adreno_zap_image[] = {
+#include "MuyuZapFirmware.inc"
+};
+extern "C" const uint64_t native_adreno_zap_image_size = sizeof(native_adreno_zap_image);
 extern "C" const uint8_t native_adreno_firmware_image[] __attribute__((weak));
 extern "C" const uint64_t native_adreno_firmware_image_size __attribute__((weak));
+/* This board's GMU image, emitted by gen-muyu-gmu-source.py from fw/gpu-firmware/gen71100_gmu.bin and compiled into
+ * the same archive as this file (MuyuGmuFirmware.o). The native_adreno_* pair above is only defined as a strong symbol
+ * by build-native-adreno-kits.py, which belongs to the sheng/uke line and is not part of this kernel's link; there the
+ * linker leaves it a weak zero, so gmuColdStart() used to refuse with "S nolink" while the real blob sat unused. */
+extern "C" const unsigned char muyu_gmu_firmware[] __attribute__((weak));
+extern "C" const uint64_t muyu_gmu_firmware_size __attribute__((weak));
+// The board's real a740 SQE microcode, from the same generated object (gen-muyu-gmu-source.py). Weak like the
+// GMU pair so a kernel built without that archive still links; a zero size is reported, never guessed at.
+extern "C" const unsigned char muyu_sqe_firmware[] __attribute__((weak));
+extern "C" const uint64_t muyu_sqe_firmware_size __attribute__((weak));
 extern "C" ShengGmuDbStatus ShengGmuCommandDbInputs(const uint8_t *, size_t, uint32_t, ShengGmuVoteInputs *) __attribute__((weak));
 extern "C" AdrenoHfiStartupStatus ShengGmuBuildStartup(const ShengGmuVoteInputs *, AdrenoHfiStartupConfig *) __attribute__((weak));
+// Both chip ids come from the generated policy headers, never from a literal here: the probe used to pass the A740
+// id (0x43050a01) to policy generated for this board's Adreno735 id (0x43030b00), so every ShengGmuBuildStartup and
+// every ShengGmuColdStart was refused on its first argument check before touching a register.
+/* Rows the console dump prints every pass (defined below, next to setDiag). boot_progress_ext slots 4..7 are
+ * overwritten by later stages (metalRows rewrites 5/6 and gpuStart rewrites 5/6/7), and an IOLog line printed once
+ * at t+10 s has scrolled away long before anyone photographs the panel, so the vote inputs and the refusal reason
+ * get their own retained rows. */
 
 extern "C" {
 extern char boot_progress_ext[8][48];
@@ -139,6 +195,27 @@ extern char boot_progress_ext_wide[2][112];
 struct gpb_result native_gpu_power_result;
 struct NativeAdrenoGmuContextReport native_gpu_gmu_context;
 volatile uint32_t native_gpu_power_stage;
+char muyu_gpu_diag[6][48];
+/* See heartbeat(): the CP-stall S/Q/C rows plus the CP's ring configuration and the WPTR/recovery counters,
+ * retained for BravearkLastLog (a C file). §38 adds Q5 (CP/GMU halt, aperture, clock status) and
+ * Q6 (deeper CP_SQE_STAT words). §43 adds Q7 (three spaced hardware RPTR / SQE-PC samples, refreshed every
+ * heartbeat whether or not the ring is stalled) and Q8 (global GFSR, context FSR, VM fault count, Q5's age). */
+char muyu_cp_stall_rows[9][64];
+extern volatile uint32_t native_adreno_wptr_fence[4];
+extern volatile uint32_t native_adreno_unstick[15];
+/* §43: read-only count of NativeAdrenoVm::fail() ("the address space was taken out of use"), the status that
+ * caused it, and the last global GFSR. Defined in drivers/Adreno740/NativeAdrenoVm.cpp; no behaviour change. */
+extern volatile uint32_t native_adreno_global_fault[4];
+/* §38: the board's hang restart, counted next to its definition so the console can show whether hangcheck
+ * ever actually recovered the GPU. [0] restarts, [1] failing step, [2] its status, [3] RBBM_STATUS after reset. */
+uint32_t native_gpu_restart[4];
+/* §43 / restart2: snapshots around gpuRestart(), printed as MUYU RT2. Pure observation: no register writes,
+ * no control-flow change. [0] zap[0], [1] zapLimit(), [2] entry RPTR, [3] entry WPTR, [4] RPTR after
+ * ring->restart(), [5] RPTR after CP_ME_INIT, [6] fenceValue(), [7] final RPTR, [8] final WPTR, [9] global GFSR. */
+uint32_t native_gpu_restart2[10];
+/* Heartbeat tick at which Q5/Q6 were last refreshed (they are only written inside the stalled branch and never
+ * cleared, §41.1); Q8 prints it so a stale Q5 cannot be mistaken for a live sample. */
+uint32_t native_gpu_stall_seq;
 }
 
 namespace {
@@ -183,6 +260,24 @@ void setRow(unsigned slot, const char *text) {
     for (; i < 47; ++i) boot_progress_ext[slot][i] = ' ';
     boot_progress_ext[slot][47] = 0;
 }
+/* Same layout as setRow, but into rows only the console dump reads (BravearkLastLog prints them every 5 s), so a
+ * later stage that rewrites boot_progress_ext 4..7 cannot erase the evidence a photograph is taken for. */
+void setDiag(unsigned slot, const char *text) {
+    if (slot >= 6) return;
+    unsigned i = 0;
+    for (; i < 47 && text[i]; ++i) muyu_gpu_diag[slot][i] = text[i];
+    for (; i < 47; ++i) muyu_gpu_diag[slot][i] = ' ';
+    muyu_gpu_diag[slot][47] = 0;
+}
+/* 2026-11-11: the very first boot of this series that reached userspace proved the 5 s printf dump is worthless from
+ * then on. That dump's first pass is at muyu-dump-at (t+10 s start + 20 s), and by t+30 s userspace owns the panel:
+ * the photo showed the two IOLog lines publish() prints at t+10 s and not one MUYU LIVE/PROBE/X/D row. So the cold
+ * start verdict is sent through IOLog the moment it is produced, on the channel that demonstrably lands. */
+void logRows(const char *tag) {
+    IOLog("MUYU %s X7 %s\n", tag, boot_progress_ext[7]);
+    IOLog("MUYU %s X6 %s\n", tag, boot_progress_ext[6]);
+    for (unsigned i = 0; i < 6; ++i) IOLog("MUYU %s D%u %s\n", tag, i, muyu_gpu_diag[i]);
+}
 void publish(const gpb_result &r) {
     char row[64];
     snprintf(row, sizeof row, "GPU m%u gcc=%s cc=%s sm=%s gp=%s io=%d pw%u%u", r.mode, gpb_state_text(r.gcc), gpb_state_text(r.cc),
@@ -194,6 +289,25 @@ void publish(const gpb_result &r) {
     setRow(6, row);
     snprintf(row, sizeof row, "SM %08x %08x %08x v%u R%08x", r.scr0, r.id0, r.id1, r.smr_valid, r.rbbm_status);
     setRow(7, row);
+    // The rows above are overwritten by gmuContext/metalRows, so the raw words also go to the console: the panel overlay
+    // only paints while it owns the display, and with no GPU client (o=0) it never does. ahb>ahb2 is the GCC branch
+    // before/after the mode-2 enable, en=1 when this run wrote it; cx>cx2 is the CX GDSCR before/after the mode-3 power
+    // sequence and hw is the gds_hw_ctrl word the PWR_ON poll read (bit31 = powered). cc_ahb/cc_gmu/pll complete the set.
+    IOLog("MUYU PWR gcc=%s cc=%s sm=%s gp=%s io=%d pw%u%u en=%u ahb=%08x>%08x pll=%08x\n",
+          gpb_state_text(r.gcc), gpb_state_text(r.cc), gpb_state_text(r.smmu), gpb_state_text(r.gpu), r.io_error,
+          r.powered_cx, r.powered_clocks, r.enabled_ahb, r.cfg_ahb, r.cfg_ahb_after, r.pll_vote);
+    IOLog("MUYU PWR cx=%08x>%08x hw=%08x gx=%08x cc_ahb=%08x cc_gmu=%08x sv=%08x\n",
+          r.cx_before, r.cx_gdscr, r.cx_hwctrl, r.gx_gdscr, r.cc_ahb, r.cc_gmu, r.cc_smmu);
+    // Retained copy of the same four states for the 5 s console dump: the IOLog lines above appear once at t+10 s and
+    // have scrolled off by the time the panel is photographed.
+    char t[48];
+    snprintf(t, sizeof t, "P %s %s %s %s io%d pw%u%u", gpb_state_text(r.gcc), gpb_state_text(r.cc),
+             gpb_state_text(r.smmu), gpb_state_text(r.gpu), r.io_error, r.powered_cx, r.powered_clocks);
+    setDiag(0, t);
+    snprintf(t, sizeof t, "X cx%08x>%08x hw%08x gx%08x", r.cx_before, r.cx_gdscr, r.cx_hwctrl, r.gx_gdscr);
+    setDiag(4, t);
+    snprintf(t, sizeof t, "A ahb%08x>%08x pll%08x mm%08x", r.cfg_ahb, r.cfg_ahb_after, r.pll_vote, r.memnoc);
+    setDiag(5, t);
 }
 constexpr unsigned kGmuBank = 1, kGmuAsid = 1, kGmuSlot = 2, kGmuSid = 5;
 constexpr uint64_t kSmmuWindow = 0x40000;   // adreno_smmu reg size at the pinned tree; ID1 says 32 x 4 KiB pages x 2
@@ -245,13 +359,15 @@ void gmuContext(const gpb_result &r) {
     native_gpu_power_stage = status ? 0x4f : 0x47;
 }
 
-// Mode 5 (read-only). Physical blocks from the pinned DT: gmu reg 0x3d6a000 size 0x35000, rscc 0x3d50000, cx_misc
+// Mode 5 (read-only). Physical blocks from the pinned DT: gmu reg 0x3d68000 size 0x37000, rscc 0x3d50000, cx_misc
 // 0x3d9e000 (gpu reg-names "cx_mem"); register dword offsets from a6xx_gmu.xml / a6xx.xml. The gmu block starts at dword
-// 0x1a800 of the GPU register space (SHENG_GMU_CORE_GPU_DELTA 0x6a000 bytes), so CM3_SYSRESET 0x1f800 is byte 0x14000.
+// 0x1a000 of the GPU register space (SHENG_GMU_CORE_GPU_DELTA 0x68000 bytes), so CM3_SYSRESET 0x1f800 is byte 0x16000.
+// Every one of these used to be the sheng board's pair (0x3d6a000/0x35000 with a 0x6a000 delta), which shifted each read
+// by 0x2000 bytes - inside a valid window, so nothing faulted and the rows looked plausible while showing other registers.
 constexpr uint64_t kCmdDbBase = 0x81c60000, kCmdDbBytes = 0x20000;
-constexpr uint64_t kGmuPhys[3] = {0x03d6a000, 0x03d50000, 0x03d9e000};
-constexpr uint64_t kGmuLen[3] = {0x35000, 0x10000, 0x1000};
-constexpr uint32_t kGmuSysReset = 0x1f800 * 4 - 0x6a000, kGmuHfiStatus = 0x1f980 * 4 - 0x6a000;
+constexpr uint64_t kGmuPhys[3] = {0x03d68000, 0x03d50000, 0x03d9e000};
+constexpr uint64_t kGmuLen[3] = {0x37000, 0x10000, 0x1000};
+constexpr uint32_t kGmuSysReset = 0x1f800 * 4 - 0x68000, kGmuHfiStatus = 0x1f980 * 4 - 0x68000;
 constexpr uint32_t kRsccSeqBusy = 0x101 * 4, kCxMiscTcmRet = 0x39 * 4;
 alignas(8) uint8_t gCmdDb[kCmdDbBytes];
 ShengGmuVoteInputs gVoteInputs;
@@ -271,11 +387,9 @@ volatile uint32_t *mapWords(uint64_t phys, uint64_t len, OSSharedPtr<IOMemoryMap
     memory->release();
     return keep ? reinterpret_cast<volatile uint32_t *>(keep->getVirtualAddress()) : nullptr;
 }
-// Mode 7. Windows in ShengGmu order (core, rscc, pdc, gpu, cx_misc): the pinned DT gmu reg-names gmu/rscc/gmu_pdc, gpu
-// reg 0x3d00000 size 0x40000 and its cx_mem 0x3d9e000; ShengGmuBindMmio refuses any other address or size.
-constexpr uint64_t kColdPhys[5] = {0x03d6a000, 0x03d50000, 0x0b280000, 0x03d00000, 0x03d9e000};
-constexpr uint64_t kColdLen[5] = {0x35000, 0x10000, 0x10000, 0x40000, 0x1000};
-constexpr uint32_t kAoIrqClr = 0x23b04 * 4 - 0x6a000, kAoIrqMask = 0x23b06 * 4 - 0x6a000;   // a6xx_gmu.xml
+// Mode 7. Windows come from ShengGmuWindowPhysical()/ShengGmuWindowBytes() at run time, not from copies kept here:
+// the literals that used to sit at this spot were the sheng board's (core 0x3d6a000/0x35000) while this board's DT
+// says 0x3d68000/0x37000, so ShengGmuBindMmio refused every cold start with ShengGmuArgument ("S bind refused").
 constexpr uint32_t kAoFatal = (1u << 0) | (1u << 3) | (1u << 5);   // A6XX_GMU_IRQ_MASK: WDOG_BITE, FENCE_ERR, AHB_BUS_ERROR
 OSSharedPtr<IOMemoryMap> gColdMaps[5], gPayloadMaps[5];
 ShengGmuMmio gColdMmio;
@@ -309,13 +423,71 @@ void readGmuState(uint32_t out[4]) {
     out[3] = *reinterpret_cast<volatile uint32_t *>(core + kGmuHfiStatus);
 }
 // Mode 8. GMU dword offsets from a6xx_gmu.xml; GPU dword offsets from a6xx.xml (A6XX-A7XX variants).
-constexpr uint32_t kGmuReg(uint32_t dword) {return dword * 4 - 0x6a000;}
+constexpr uint32_t kGmuReg(uint32_t dword) {return dword * 4 - 0x68000;}   // offset inside the 0x3d68000 window
 constexpr uint32_t kG2hClr = kGmuReg(0x1f991), kG2hInfo = kGmuReg(0x1f992), kG2hMask = kGmuReg(0x1f993);
 constexpr uint32_t kH2gSet = kGmuReg(0x1f994), kGxStatus = kGmuReg(0x1f8d0);   // GMU_SPTPRAC_PWR_CLK_STATUS (A7XX)
+// fix193: the HOST2GMU clear register sits right after the set register (GMU2HOST clear/info/mask at 0x1f991-3,
+// HOST2GMU set/clear at 0x1f994-5), so withdrawing the OOB_GPU_SET request is a write of bit 30 here.
+constexpr uint32_t kH2gClr = kGmuReg(0x1f995);
 constexpr uint32_t kRbbmStatus = 0x0210 * 4, kGbifHalt = 0x3c45 * 4;
 extern "C" {
 uint32_t native_gpu_gx[8];   // vote status, fw error, oob ack polls, gx before, gx after, gx gdscr, RBBM_STATUS, GBIF_HALT
 }
+// fix187 (2026-11-16): gpuOn() used to be called from inside gmuColdStart(), i.e. BEFORE logRows("COLD"). A hang or a
+// bus stall in the GX power-on therefore swallowed the whole COLD block, and power=8/9 looked exactly like "the cold
+// start never ran" in all three runs that tried it. Move the call after the COLD rows, and make it switchable so an
+// A/B can tell "GX kills the system" from "the cold start is the problem".
+int native_gpu_gxstop = 1;        // 1 = run gpuOn() after the COLD rows, 0 = skip it (sheng-gpu-gxstop=0)
+int native_gpu_cold_status = -1;  // ShengGmuStatus of the last cold start, for the deferred gpuOn()
+// fix189 (2026-11-16): fix188 (power=8 + gxstop=1) booted to the lock screen with a running clock but with the touch
+// stream dead (NATIVE-NVT started at 97.8 s and printed no frames= row in 177 s), while fix187 (same kernel,
+// gxstop=0) had 18000 frames. gpuOn() is the only difference, so it is split into four numbered sub-steps that can
+// be stopped one at a time: sheng-gpu-gxstep=N parks the probe thread after sub-step N. Each sub-step prints its own
+// IOLog line before the next one starts, so a stall never hides the step that completed.
+int native_gpu_gxstep = 5;        // 1 clear+mask, 2 +HFI set_freq, 3 +H2G ack, 4 +GX status/GDSCR, 5 full
+// fix193 (2026-11-16 12:0x): fix191/fix192 with the touch pump's watch counters settled what fix188 could not.
+//   gxstop=1 (GX powered):  fresh stopped at 60 frames and never moved again; peek 420/s, valid==peek, err=0,
+//                           i.e. the panel answers SPI but has stopped scanning altogether.
+//   gxstop=0 (GX off):      frames=3000 contacts=1803 published=1803 errors=0 by 233 s and frames=6000 by 254 s,
+//                           i.e. touch works; the 0.7 frames/s in the first 40 s is the chip's idle scan, not a fault.
+// So GX power-on stops the touch chip from scanning. This switch asks the next question: is that reversible? With
+// sheng-gpu-gxcycle=1 the OOB_GPU_SET request is withdrawn (kH2gClr bit 30) right after the ack and the GX status is
+// read back, then gpuOn() returns with GX off and the boot continues. If the desktop and the touch stream come back,
+// GX-on is a live state and not a one-time corruption, and the eventual fix is to power GX only while a GPU client
+// needs it (or to find what the GMU vote does to the panel/touch rail in the meantime).
+int native_gpu_gxcycle = 0;       // 1 = withdraw the GX request after the ack and continue the boot (sheng-gpu-gxcycle=1)
+/* fix197 (2026-11-16): ~90 of the ~190 archived boots stop before the first display swap and hard reset inside a
+ * 171-180 s window, GX or no GX (fix16/fix22/fix168 all predate the GX code), and the log of those runs is full of
+ * apfs_trim_to_prev_fsize and "ufs lock: N give-ups". So the boot stall is a first-boot storage/vnode storm, not a
+ * GPU fault - and while it is in progress it hides everything GX does. The whole sequence runs on our own probeThread,
+ * so GX can simply be held back until the system is already on its feet: sheng-gpu-gxdelay=N waits N seconds after the
+ * GMU cold start (steps 1-2, proven harmless: touch worked parked at step 2) before the GMU_OOB_GPU_SET write. That
+ * separates "GX powered during a fragile boot" from "GX powered into a running system", and the user can watch the
+ * exact second touch stops. */
+int native_gpu_gxdelay = 0;       // seconds to wait before the OOB_GPU_SET write (sheng-gpu-gxdelay=N)
+/* fix210 (2026-11-16 20:1x): the GMU cold start is the step that kills the frame producer as soon as the AGX/Metal
+ * addon is mounted, and only then: fix174 (power=7, addon) offered 3 frames and then went silent for 536 s, fix207 and
+ * fix208 (same config) reproduced it twice from the kernel side - the 5 s MUYU FBW timer showed pending=0 transferred=0
+ * gpu=0 bypass=0 held=0 at every sample, i.e. nothing stuck in the framebuffer, nobody upstream submitting. The same
+ * cold start without the addon is harmless (fix182/fix185 reach the desktop, 18000 touch frames, 640 swaps), and the
+ * addon with the cold start stopped early is harmless too (fix175 coldstop=2, fix176 coldstop=4 both reach the desktop).
+ * So the poison is "firmware executing, addon mounted", not either alone.
+ * fix197 already found the shape of this class of fault: bringing a rail up into a system that is *already running* is
+ * fine (touch init at 90 s, GX at 351 s), while bringing it up during userland bring-up is what breaks it. The cold
+ * start currently runs at ~55 s, right in the middle of the boot storm. sheng-gpu-colddelay=N holds it back N seconds
+ * so it lands after the UI is up (~160 s), which turns "does the addon survive a live GMU" into a single-variable
+ * question with the same image. 0 (absent) keeps today's placement. */
+int native_gpu_colddelay = 0;     // seconds to wait before ShengGmuColdStart (sheng-gpu-colddelay=N)
+/* fix199 (2026-11-16): fix198 proved the whole power=8 front half is good - GMU cold start, the HFI firmware handshake
+ * (X6 P0 g12 k606 e0 t0 n4), 681 s of uptime and 3995 published contacts - as long as kH2gSet bit 30 is never written.
+ * fix197 then showed that writing it into an already running system does not stop the touch chip (frames keep coming,
+ * published stays 1:1 with contacts, hid climbs) but leaves the UI deaf: 861 contacts were produced while the frame
+ * buffer stayed at 22-36 changed channels, i.e. only the lock screen clock was moving. The break is therefore after the
+ * driver, on the user-space consumer side (backboardd takes HID events and drives the scene), not in the touch path.
+ * These two switches let the probe rebuild that consumer from the kernel once GX is on, so the question "is GX-on a
+ * recoverable user-space state or a one-way corruption" gets a direct answer without touching the GPU sequence. */
+int native_gpu_respring = 0;      // sheng-gpu-respring=N: N s after GX-on, restart backboardd (0 = off)
+int native_gpu_respring_sb = 0;   // sheng-gpu-respring-sb=N: a further N s, then restart SpringBoard (0 = off)
 int hfiWait(void *) {IODelay(100); return 0;}
 // Mode 9. GPU register access through the cold-start GPU window (dword offsets), and the GMU core window.
 uint32_t gpuRd(uint32_t reg) {
@@ -333,6 +505,18 @@ bool gxOn() {
     gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kGxStatus, &v);
     return !(v & 3);
 }
+/* fix194 (2026-11-16 12:0x): the 172 s reset is our own poller, not GX itself.
+ * fix190 parked inside gpuOn (gxstep=3) and heart-beat never started: GX was on and the run lived to 360 s.
+ * fix193 returned from gpuOn, so heartbeat() took over and the very same power=8 image hard-reset at 171.85 s;
+ * fix166 (power=9) froze at 175.91 s, i.e. the same ~120 s after GX came up. The one thing heartbeat() does that a
+ * parked run does not is read the GPU window (ShengGmuGpu) every 2 s - RBBM_STATUS, CP_HW_FAULT, RB_RPTR/WPTR, the
+ * GPU FSR and the SMMU GFSR - while a CP that was never initialised sits behind it. So every GPU-window access in
+ * heartbeat() is now gated on this flag, which only gpuStart() sets once the CP proved it can run an IB and write the
+ * scratch word through its own 4K context. GMU-window reads (kGxStatus/kG2hInfo) stay ungated: they ran unchanged
+ * through every stable mode<=7 boot and through the 360 s fix190 run.
+ * Consequence for reading the log: at power=8 row 4 now says "gx-on cp-off" instead of a GPU status word dump. */
+bool native_gpu_cp_live = false;      // set by gpuStart() when the CP proved it executes (c[0] == 10)
+static inline bool gpuPollable() {return native_gpu_cp_live && gxOn();}
 int ringWrite(void *, uint32_t reg, uint32_t value) {
     return gColdDevice.io.write32(gColdDevice.io.cookie, ShengGmuGpu, size_t(reg) * 4, value);
 }
@@ -340,16 +524,39 @@ int ringRead(void *, uint32_t reg, uint32_t *value) {
     return gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuGpu, size_t(reg) * 4, value);
 }
 int ringBarrier(void *) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
+/* fix119: the two callbacks NativeAdrenoPreempt wants. gmuWrAt is the GMU's own window by dword offset (the preemption
+ * keepalive vote lives at 0x1f8c4, outside the GPU's register window); preemptWrite is a GPU register write that survives the
+ * AHB fence: bit 1 of GPU_GMU_AO_GMU_AHB_FENCE_STATUS (GMU dword 0x23b13) reports a dropped context-switch write, so it is
+ * retried for at most 2 ms while the GX domain wakes. Both are ports of UniXNU-uke/package/GpuPowerProbe.cpp:362-380. */
+int gmuWrAt(void *, uint32_t dword, uint32_t value) {
+    return gColdDevice.io.write32(gColdDevice.io.cookie, ShengGmuCore, kGmuReg(dword), value);
+}
+int preemptWrite(void *, uint32_t reg, uint32_t value) {
+    for (unsigned attempt = 0; attempt < 200; ++attempt) {
+        if (ringWrite(nullptr, reg, value)) return 1;
+        ringBarrier(nullptr);
+        uint32_t status = 0;
+        if (gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kGmuReg(0x23b13), &status)) return 1;
+        if (!(status & 2)) return 0;
+        IODelay(10);
+    }
+    return 1;
+}
 // The ring, memptrs and lists are Normal non-cacheable on both sides (GPU PTE MAIR 0, CPU write-combine): no cache
 // maintenance, only ordering.
 int ringPublish(void *, const volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 int ringAcquire(void *, volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 uint64_t ringNow(void *) {uint64_t us = 0; coldNow(nullptr, &us); return us;}
 int ringIdle(void *) {IODelay(20); return 0;}
-OSSharedPtr<IOMemoryMap> gGpuMaps[5];
-volatile uint8_t *gGpuCpu[5];
-NativeAdrenoGpuBuffer gGpuBuffers[5];
+OSSharedPtr<IOMemoryMap> gGpuMaps[GpuBufferCount];
+volatile uint8_t *gGpuCpu[GpuBufferCount];
+NativeAdrenoGpuBuffer gGpuBuffers[GpuBufferCount];
 NativeAdrenoRing gRing;
+/* fix119: the second ring of the CP's preemption, as uke (sheng-gpu-preempt=2) has it. Nothing is attached to it unless
+ * the carrier asks: sheng-tum=...p. The board's command line is full, so the switch rides the render-mode carrier. */
+NativeAdrenoRing gRing1;
+bool gPreemptWanted;
+unsigned gPreemptMode = 2;
 NativeAdrenoCpInit gCpInit;
 extern "C" {
 NativeAdrenoGmuContextReport native_gpu_context;
@@ -401,6 +608,90 @@ int dramRead32(uint64_t pa, uint32_t *value) {
     *value = uint32_t(w >> ((pa & 4) * 8));
     return 0;
 }
+// fix103: the write side of dramRead32, for the canary the submit path plants in the swap surface. A fresh uncached mapping, so
+// the word is in DRAM (not in a line of the CPU's that a later flush would put back over the GPU's writes) before the next pass.
+int dramWrite32(uint64_t pa, uint32_t value) {
+    IODeviceMemory *m = IODeviceMemory::withRange(pa & ~uint64_t(0xfff), 0x1000);
+    if (!m) return 1;
+    IOMemoryMap *map = m->map(kIOMapAnywhere | kIOMapInhibitCache);
+    m->release();
+    if (!map) return 1;
+    *reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress() + (pa & 0xffc)) = value;
+    __asm__ volatile("dsb sy" ::: "memory");
+    map->release();
+    return 0;
+}
+/* fix123.2: the one hook the frame preview needs. A 3200x2136 panel surface is 27 MB and ONE contiguous span, but the
+ * imported IOSurface has no kernel mapping and 0xE3940000 is outside the physical aperture phystokv covers (fix123
+ * printed "nomap", fix123.1 "noread st=e00002c7"), so every word would otherwise be its own IODeviceMemory. One
+ * kIOMapInhibitCache mapping of the whole span is kept for the life of the boot: reads see DRAM as the GPU left it,
+ * stores go straight to the panel buffer, which is exactly what a marker needs. Only the first range asked for is
+ * mapped - if a later request names another one, it is refused rather than leaking a second 27 MB mapping. */
+static IOMemoryMap *gFrameWindow;
+static uint64_t gFrameWindowPhysical, gFrameWindowBytes;
+int frameWindow(uint64_t physical, size_t bytes, uintptr_t *base) {
+    if (!base || !bytes) return 1;
+    if (gFrameWindow) {
+        if (gFrameWindowPhysical != physical || gFrameWindowBytes < bytes) return 1;
+        *base = gFrameWindow->getVirtualAddress();
+        return 0;
+    }
+    IODeviceMemory *m = IODeviceMemory::withRange(physical & ~uint64_t(0xfff), (bytes + (physical & 0xfff) + 0xfff) & ~uint64_t(0xfff));
+    if (!m) return 1;
+    IOMemoryMap *map = m->map(kIOMapAnywhere | kIOMapInhibitCache);
+    m->release();
+    if (!map) return 1;
+    gFrameWindow = map; gFrameWindowPhysical = physical; gFrameWindowBytes = bytes;
+    IOLog("MUYU FBWIN p=%08x%08x bytes=%llx va=%p\n", (uint32_t)(physical >> 32), (uint32_t)physical,
+          (unsigned long long)bytes, (void *)map->getVirtualAddress());
+    *base = map->getVirtualAddress();
+    return 0;
+}
+/* fix50: the two board hooks the submit path has always expected (int-070/099/100) but this board never installed. Only
+ * native_adreno_dram_read32 was registered, so sampleWord() left *cached at ~0u (fix49 read "cffffffff"), auditRange() returned
+ * Unsupported, dirty stayed 0 and distrustWriteCombined() never fired - which left publishForDevice() skipping the client BO's
+ * CPU cache clean on every submission. The cacheable alias here is the default IODeviceMemory mapping (physRead64 explicitly
+ * asks for kIOMapInhibitCache to get DRAM); data caches are physically tagged, so it sees lines another task's view dirtied. */
+extern "C" int (*native_adreno_cached_read32)(uint64_t physical, uint32_t *value);
+extern "C" int (*native_adreno_line_audit)(uint64_t physical, size_t bytes, uint32_t *dirty, uint32_t *stale);
+int cachedRead32(uint64_t pa, uint32_t *value) {
+    IODeviceMemory *m = IODeviceMemory::withRange(pa & ~uint64_t(0xfff), 0x1000);
+    if (!m) return 1;
+    IOMemoryMap *map = m->map(kIOMapAnywhere);
+    m->release();
+    if (!map) return 1;
+    const uintptr_t va = uintptr_t(map->getVirtualAddress()) + (pa & 0xfff);
+    *value = *reinterpret_cast<volatile uint32_t *>(va);
+    /* Drop the line this read brought in: a stale clean copy would later differ from DRAM and look like a dirty one. */
+    __asm__ volatile("dsb sy\n\tdc civac, %0\n\tdsb sy" :: "r"(va & ~uintptr_t(63)) : "memory");
+    map->release();
+    return 0;
+}
+int lineAudit(uint64_t pa, size_t bytes, uint32_t *dirty, uint32_t *stale) {
+    if (!bytes || ((pa | bytes) & 63) || (pa & 0xfff) + bytes > 0x1000) return 1;
+    IODeviceMemory *cm = IODeviceMemory::withRange(pa & ~uint64_t(0xfff), 0x1000);
+    IODeviceMemory *dm = IODeviceMemory::withRange(pa & ~uint64_t(0xfff), 0x1000);
+    if (!cm || !dm) {if (cm) cm->release(); if (dm) dm->release(); return 1;}
+    IOMemoryMap *c = cm->map(kIOMapAnywhere);
+    IOMemoryMap *d = dm->map(kIOMapAnywhere | kIOMapInhibitCache);
+    cm->release(); dm->release();
+    if (!c || !d) {if (c) c->release(); if (d) d->release(); return 1;}
+    const uintptr_t cv = uintptr_t(c->getVirtualAddress()) + (pa & 0xfff);
+    const uintptr_t dv = uintptr_t(d->getVirtualAddress()) + (pa & 0xfff);
+    for (size_t at = 0; at < bytes; at += 64) {
+        const volatile uint64_t *cc = reinterpret_cast<const volatile uint64_t *>(cv + at);
+        const volatile uint64_t *dd = reinterpret_cast<const volatile uint64_t *>(dv + at);
+        uint64_t copy[8];bool differs = false;
+        for (unsigned i = 0; i < 8; ++i) {copy[i] = cc[i]; if (copy[i] != dd[i]) differs = true;}
+        if (!differs) continue;
+        __asm__ volatile("dsb sy\n\tdc civac, %0\n\tdsb sy" :: "r"((cv + at) & ~uintptr_t(63)) : "memory");
+        bool written = true;
+        for (unsigned i = 0; i < 8; ++i) if (dd[i] != copy[i]) written = false;
+        if (written) ++*dirty; else ++*stale;
+    }
+    c->release(); d->release();
+    return 0;
+}
 // Software walk of the GPU context's TTBR0 table (bank 0 TTBR0 +0x20, TCR +0x30: T0SZ bits 5:0, 4 KiB granule) for one GPU address.
 // The SMMU here has no address translation operations (IDR0.ATOSNS), so this shows what the table says, not what the TLB holds.
 // Returns the leaf descriptor (0 when absent) and the physical address it maps the address to.
@@ -439,12 +730,356 @@ void cpRow(const char *what) {
              gpuRd(A740_RBBM_INT_0_STATUS), gpuRd(A740_CP_HW_FAULT), gpuRd(A740_CP_RB_RPTR), gpuRd(A740_CP_RB_WPTR),
              mem ? mem[0] : 0, mem ? mem[1] : 0, gpuFsr());
     setRow(7, row);
+    // 2026-11-14 01:5x, fix38: the CP bring-up either reaches stage 10 (the GPU wrote its scratch word through its own context and
+    // signalled the fence) or stops at one of the earlier stages; only stage 10 starts the heartbeat, the interrupt test and the
+    // self-test suite. Everything below that gate was invisible in the persistent window, which is why fix37's probe never ran.
+    IOLog("MUYU CPROW %s\n", row);
+}
+// fix39: the driver calls this from a fence wait that is about to report a timeout, so the register row is captured at the failure and
+// not only at bring-up. Weak from the driver's side; the board probe owns the registers.
+// fix40: fix39 showed the shape of the stall (RPTR 0x36 behind WPTR 0x3d, CB0 FSR 0x80000402, 5 submits / 4 retires), so the context
+// bank's fault address is the one number that turns "some IOVA is unmapped" into "this IOVA is unmapped".
+// fix41: FSR comes back with MULTI (bit 31) set, which makes FAR unpredictable (it read back zero on fix40), so the records that do name
+// the fault are the ring itself - the packet the CP stopped on - and the submit path's own IB log (the IB it was handed, with its first 28
+// dwords). Both are dumped once per boot: the fence that hangs is the first one and it stays hung, so a second dump would repeat itself.
+extern "C" {extern volatile uint32_t native_adreno_ib_log[4][4+256];extern volatile uint32_t native_adreno_ib_log_count;
+extern volatile uint32_t native_adreno_table_switches[8];
+/* fix42: the last four BoMaps as [iova lo, iova hi, handle, pid], so a faulting address can be matched against what was mapped. */
+extern volatile uint32_t native_adreno_map_log[4][4];extern volatile uint32_t native_adreno_map_log_count;
+/* fix48: the submit path's own coherence sample of the first IB word: [1] the kernel's cacheable alias, [2] DRAM before
+ * publishMapped(), [3] DRAM after it. fix47 saw DRAM read zero at the translated page while the CP held the real header. */
+extern volatile uint32_t native_adreno_coherence[8];
+/* fix50: unconditional physical-page clean at Submit: [0] passes, [1] KiB, [2] last status, [3] spans of the last BO. */
+extern volatile uint32_t native_adreno_fix50_clean[4];
+/* fix50: [0] audits run, [2] dirty lines the board hook wrote back - proves the client's IB really was CPU-cached. */
+extern volatile uint32_t native_adreno_wc_audit[6];
+/* fix43: the last four submissions the ring wrote, [0] seqno, [1] next, [2] end, [3] total, [4..] the words. */
+extern volatile uint32_t native_adreno_ring_log[4][4+112];extern volatile uint32_t native_adreno_ring_log_count;}
+extern "C" void native_adreno_cp_state(void) {
+    cpRow("evt");
+    {
+        static unsigned dumped;
+        if (!dumped) {
+            ++dumped;
+            const uint32_t rptr = gpuRd(A740_CP_RB_RPTR), wptr = gpuRd(A740_CP_RB_WPTR);
+            const uint32_t words = uint32_t(gGpuBuffers[1].bytes >> 2);
+            const volatile uint32_t *rb = reinterpret_cast<const volatile uint32_t *>(gGpuCpu[1]);
+            if (rb && words) {
+                for (unsigned line = 0; line < 2; ++line) {
+                    char dump[128]; size_t n = 0;
+                    for (unsigned k = 0; k < 8; ++k)
+                        n += size_t(snprintf(dump + n, sizeof dump - n, " %08x", rb[(rptr + line * 8 + k) % words]));
+                    IOLog("MUYU RB %x>%x +%x:%s\n", rptr, wptr, line * 8, dump);
+                }
+            }
+            const uint32_t count = native_adreno_ib_log_count;
+            const volatile uint32_t *ib = native_adreno_ib_log[count ? (count - 1) & 3 : 0];
+            IOLog("MUYU IB n=%u iova=%08x%08x bytes=%x ttbr=%u sw=%u head=%08x,%08x,%08x,%08x,%08x,%08x\n", count,
+                  ib[2], ib[1], ib[3], native_adreno_table_switches[3], native_adreno_table_switches[1],
+                  ib[4], ib[5], ib[6], ib[7], ib[8], ib[9]);
+            /* fix44: the whole IB (fix43 left the ring exonerated: it holds exactly the words the driver meant to write, and four
+             * identical fence packets completed before this one). Sixteen dwords a line, 256 in all, so the packet that waits can be
+             * named from the log instead of inferred from a stall. */
+            for (unsigned line = 0; line < 16; ++line) {
+                char dump[192]; size_t k = 0;
+                for (unsigned i = 0; i < 16; ++i)
+                    k += size_t(snprintf(dump + k, sizeof dump - k, " %08x", ib[4 + line * 16 + i]));
+                IOLog("MUYU IB %03x:%s\n", line * 16, dump);
+            }
+            /* fix43: the ring dump above is the memory the CP reads; the ring log is the words the driver meant to write
+             * ([0] seqno, [1] next, [2] end, [3] total, [4..] the words from next). Printing both makes a mismatch - a write
+             * that never reached DRAM, or a ring whose IOVA is not the one the CP fetches - visible as a difference instead of
+             * an inference. The stalled submission is the last one; the one before it is the shape that completed. */
+            const uint32_t rings = native_adreno_ring_log_count;
+            for (unsigned back = 1; back <= 2 && back <= rings; ++back) {
+                const volatile uint32_t *r = native_adreno_ring_log[(rings - back) & 3];
+                IOLog("MUYU RL -%u seq=%u next=%x end=%x total=%x\n", back, r[0], r[1], r[2], r[3]);
+                for (unsigned line = 0; line < 2; ++line) {
+                    char dump[128]; size_t k = 0;
+                    for (unsigned i = 0; i < 8; ++i)
+                        k += size_t(snprintf(dump + k, sizeof dump - k, " %08x", r[4 + line * 8 + i]));
+                    IOLog("MUYU RL -%u +%u:%s\n", back, line * 8, dump);
+                }
+            }
+        }
+    }
+    const uint32_t id1 = native_gpu_context.id1;
+    if (!gSmmuMap || !id1) return;
+    const size_t page = (id1 >> 31) ? 0x10000 : 0x1000, bank0 = page << (((id1 >> 28) & 7) + 1);
+    if (bank0 + 0x70 > kSmmuWindow) return;
+    const volatile uint32_t *base = reinterpret_cast<const volatile uint32_t *>(gSmmuMap->getVirtualAddress());
+    /* fix42: fix41 ran with table switching on (the CPU wrote TTBR0 once) and the same translation fault came back, so the question is
+     * no longer whether the switch was attempted but which table the bank holds and whether the client's IB address is in it. CBn_SCTLR,
+     * CBn_TCR and the 64-bit CBn_TTBR0/1 say the table; the map log says the last four BoMaps, so the IB's IOVA can be matched against
+     * them here instead of in a later round. FSR is read last because the read clears it. */
+    {
+        static unsigned banks;
+        if (banks < 2) {
+            ++banks;
+            IOLog("MUYU CB sctlr=%x tcr=%x ttbr0=%08x%08x ttbr1=%08x%08x far=%x fsynr=%x fsr=%x\n",
+                  base[(bank0 + 0x00) / 4], base[(bank0 + 0x10) / 4], base[(bank0 + 0x24) / 4], base[(bank0 + 0x20) / 4],
+                  base[(bank0 + 0x2C) / 4], base[(bank0 + 0x28) / 4], base[(bank0 + 0x5C) / 4], base[(bank0 + 0x68) / 4],
+                  base[(bank0 + 0x58) / 4]);
+            /* fix142: the line above labels +0x10 as "tcr", but that is CBn_TCR2. The real
+             * CBn_TCR (T0SZ/T1SZ, EPD0/EPD1, TG0/1) lives at +0x30 and has never been read.
+             * idr2=00005511 gives UBS code 5 -> ias 48, so the client's 4.6 GiB IOVAs should be
+             * inside TTBR0, but the live word is the fact. Plus the full fault state: FAR high
+             * half, FSYNR1, and the global GFSR/GFSYNR/GFAR. All reads, nothing written. */
+            {
+                const uint32_t cbTcr   = base[(bank0 + 0x30) / 4];
+                const uint32_t cbTcr2  = base[(bank0 + 0x10) / 4];
+                const uint32_t cbActlr = base[(bank0 + 0x04) / 4];
+                const uint32_t cbCidr  = base[(bank0 + 0x34) / 4];
+                const uint32_t cbFsr   = base[(bank0 + 0x58) / 4];
+                const uint32_t cbFarL  = base[(bank0 + 0x5c) / 4];
+                const uint32_t cbFarH  = base[(bank0 + 0x60) / 4];
+                const uint32_t cbSyn0  = base[(bank0 + 0x68) / 4];
+                const uint32_t cbSyn1  = base[(bank0 + 0x6c) / 4];
+                const uint32_t idr2    = base[0x28 / 4];
+                static const unsigned widths[6] = {32, 36, 40, 42, 44, 48};
+                const unsigned vcode = (idr2 >> 8) & 15u, ocode = (idr2 >> 4) & 15u;
+                IOLog("MUYU CBX tcr=%08x t0sz=%u t1sz=%u epd0=%u epd1=%u tcr2=%08x actlr=%x cid=%x\n",
+                      cbTcr, cbTcr & 63u, (cbTcr >> 16) & 63u, (cbTcr >> 7) & 1u, (cbTcr >> 23) & 1u,
+                      cbTcr2, cbActlr, cbCidr);
+                IOLog("MUYU CBF fsr=%08x far=%08x%08x fsynr=%08x/%08x gfsr=%08x gfsynr=%08x/%08x gfar=%08x%08x idr2=%08x ias=%u oas=%u\n",
+                      cbFsr, cbFarH, cbFarL, cbSyn0, cbSyn1,
+                      base[0x48 / 4], base[0x50 / 4], base[0x54 / 4], base[0x44 / 4], base[0x40 / 4],
+                      idr2, vcode < 5 ? widths[vcode] : 48u, ocode < 6 ? widths[ocode] : 0u);
+            }
+            const uint32_t maps = native_adreno_map_log_count;
+            for (unsigned k = 0; k < 4 && k < maps; ++k) {
+                const volatile uint32_t *m = native_adreno_map_log[(maps - 1 - k) & 3];
+                IOLog("MUYU MAP -%u iova=%08x%08x h=%x pid=%u\n", k, m[1], m[0], m[2], m[3]);
+            }
+        }
+    }
+    /* fix107: every stream this SMMU knows, printed once. The GPU's own masters share one stream (slot 0, sid 1) and the CP's
+     * writes land through it, so the question is not whether a table exists but whether the 3D side's traffic is matched at all.
+     * On this firmware a BYPASS S2CR reads back as FAULT (SmmuBypass.h), so an unmatched stream faults instead of passing through
+     * untranslated - and GFSR has stayed 0 for a hundred frames. That covers FAULT and TRANSLATE, but not "TRANSLATE into some
+     * other bank": an S2CR naming a CBAR/SMR the bank does not own routes the transaction somewhere harmless without a fault
+     * either. Print SMR/S2CR pairs and the global control words so the route is a fact rather than an inference. */
+    {
+        static unsigned streams;
+        if (!streams) {
+            ++streams;
+            char row[384]; size_t at = 0;
+            at += size_t(snprintf(row + at, sizeof row - at,
+                                  "MUYU S2CR scr0=%x scr1=%x scr2=%x idr0=%08x idr1=%08x idr2=%08x idr7=%08x",
+                                  base[0], base[0x04 / 4], base[0x0c / 4],
+                                  base[0x20 / 4], base[0x24 / 4], base[0x28 / 4], base[0x3c / 4]));
+            for (unsigned i = 0; i < 8; ++i)
+                at += size_t(snprintf(row + at, sizeof row - at, " | %u smr=%08x s2cr=%08x",
+                                      i, base[(0x800 + 4 * i) / 4], base[(0xc00 + 4 * i) / 4]));
+            IOLog("%s\n", row);
+            /* fix138: the GX-side store still never lands (§69.97). The 8-slot census only
+             * covered the streams Linux happens to use; a hidden SMR routing the RB/UCHE
+             * master into a different context bank would explain "no fault, no write" without
+             * contradicting the CP's own writes. SMMUv2 gives SMR 0x800..0x9ff and S2CR
+             * 0xc00..0xdff, so 24 slots stay well inside both ranges and inside the mapped
+             * 0x40000 window. Pure observation, once, and no register is written. */
+            for (unsigned group = 1; group < 3; ++group) {
+                at = 0;
+                at += size_t(snprintf(row + at, sizeof row - at, "MUYU S2CR+%u", group));
+                for (unsigned i = group * 8; i < (group + 1) * 8; ++i)
+                    at += size_t(snprintf(row + at, sizeof row - at, " | %u smr=%08x s2cr=%08x",
+                                          i, base[(0x800 + 4 * i) / 4], base[(0xc00 + 4 * i) / 4]));
+                IOLog("%s\n", row);
+            }
+        }
+    }
+    /* fix109: is the GX domain still up at the moment a frame fails? Everything that has been proven working - the CP fetching and
+     * executing its ring, the CP's own CP_EVENT_WRITE7 landing in an imported surface, the RB_DONE_TS stamps that make z1 read
+     * b1 e1 - lives on the CX side of the GPU. Everything that has never written a byte lives on the GX side (RB, ROP, UCHE). A
+     * powered-down GX domain explains that split exactly: the AHB interface stays alive (so every register read in fix102..fix107
+     * returns a coherent, live value) while the datapath behind it is unclocked and produces nothing.
+     *
+     * The signature that started this: UCHE_CACHE_WAYS (0x0e17) read 0x00800000 at 133.6 s and 0x00000000 from 135.8 s on, while
+     * TRAP_BASE / WRITE_THRU_BASE / GMEM_RANGE / MODE_CNTL all kept the values hw_init wrote. A register that loses its value on
+     * its own is a domain that went through a power transition; the power-up register list (NativeAdrenoPwrupRegs.h) contains
+     * 0x0e17, so a correct GX power-up would have restored it.
+     *
+     * a7xx_gmu_gx_is_on(): GX is up when A7XX_GMU_SPTPRAC_PWR_CLK_STATUS has neither GX_HM_GDSC_POWER_OFF (bit 0) nor
+     * GX_HM_CLK_OFF (bit 1). Also printed: the CPU-side SPTPRAC control pair (0x1a880 clock, 0x1a881 power), GPU_CC_GX_GDSCR,
+     * RBBM_STATUS (per-block busy bits), RBBM_STATUS3 bit 24 (SMMU stalled on fault), and 0x0e17 read twice in a row - the second
+     * read separates "the value is really 0" from "reading this register clears it". */
+    {
+        /* 0xdeadbeef in, so a failed window read is not mistaken for "the status says everything is fine": fix109 read st=0 for GX-on
+         * while sptpclk/sptppwr also read 0, which is what a closed GMU window looks like. gpuRd() already has that sentinel. */
+        uint32_t gxst = 0xdeadbeefu, gxclk = 0xdeadbeefu, gxpwr = 0xdeadbeefu, rbbm = 0, rbbm3 = 0, ways1 = 0, ways2 = 0;
+        (void)gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kGmuReg(0x1f8d0), &gxst);
+        (void)gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kGmuReg(0x1a880), &gxclk);
+        (void)gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kGmuReg(0x1a881), &gxpwr);
+        rbbm = gpuRd(0x0210);
+        rbbm3 = gpuRd(0x0213);
+        ways1 = gpuRd(0x0e17);
+        ways2 = gpuRd(0x0e17);
+        IOLog("MUYU GX st=%08x on=%u gdscoff=%u clkoff=%u sptpclk=%08x sptppwr=%08x rbbm=%08x rb=%u ccu=%u uche=%u sp=%u gpu=%u s3=%08x stall=%u ways=%08x/%08x\n",
+              gxst,(gxst & 3u)?0u:1u,gxst & 1u,(gxst >> 1) & 1u,gxclk,gxpwr,rbbm,
+              uint32_t((rbbm >> 7) & 1u),uint32_t((rbbm >> 8) & 1u),uint32_t((rbbm >> 17) & 1u),uint32_t((rbbm >> 18) & 1u),uint32_t((rbbm >> 23) & 1u),
+              rbbm3,uint32_t((rbbm3 >> 24) & 1u),ways1,ways2);
+    }
+    /* fix144: GBIF is the bus gate between the GX domain and DDR. gpuHwInit() clears A740_GBIF_HALT
+     * (0x3c45) and A740_RBBM_GBIF_HALT (0x0016) once at bring-up and then never reads them again;
+     * every later run has only read RBBM_STATUS3. A halt bit that came back on would produce exactly
+     * the fix140 shape - engine reports Completed, no SMMU fault, no stall, not one byte in DRAM -
+     * because GX stores are queued at the bus entrance while the CP's CX-side writes still land.
+     * Pure observation: read both halt/ack pairs plus the UCHE->GBIF config. Offsets from a6xx.xml
+     * (GBIF_HALT 0x3c45 / ACK 0x3c46, RBBM_GBIF_HALT 0x0016 / ACK 0x0017, UCHE_GBIF_GX_CONFIG
+     * 0x0e3a, UCHE_CMDQ_CONFIG 0x0e3c, UCHE_FILTER_CNTL 0x0e18, UCHE_MODE_CNTL 0x0e01). No writes. */
+    {
+        const uint32_t gHalt = gpuRd(A740_GBIF_HALT), gAck = gpuRd(0x03c46);
+        const uint32_t rHalt = gpuRd(A740_RBBM_GBIF_HALT), rAck = gpuRd(0x00017);
+        const uint32_t ucheGx = gpuRd(A740_UCHE_GBIF_GX_CONFIG), ucheCmdq = gpuRd(A740_UCHE_CMDQ_CONFIG);
+        const uint32_t ucheFilt = gpuRd(0x00e18), ucheMode = gpuRd(0x00e01), uchePf = gpuRd(A740_UCHE_CLIENT_PF);
+        IOLog("MUYU GBF gh=%08x/%08x rh=%08x/%08x gx=%08x cmdq=%08x filt=%08x mode=%08x pf=%08x\n",
+              gHalt,gAck,rHalt,rAck,ucheGx,ucheCmdq,ucheFilt,ucheMode,uchePf);
+    }
+    /* fix219: this port has no DVFS - native_gpu_dcvs is only ever weakly imported (NativeAdrenoSubmit.cpp:122), no HFI message is
+     * ever sent, and it is Linux's a6xx_gmu_set_freq() that raises the GX rate after resume. So the question is what the GPUCC PLLs
+     * actually run at: PLL1 is the GMU's own (L 0x16, "rounds to 220 MHz"), and GX takes PLL0. A PLL0 still at the GMU value would
+     * make every full-screen pass cost tens of milliseconds - which is exactly the present rate measured in fix218 (165 passes a
+     * frame, 36 ms each, 750 MB/s of effective bandwidth). Read-only: MODE/L_VAL/USER_CTL of both PLLs, no writes. */
+    if (gVa[GPB_WIN_GPUCC]) {
+        auto ccRd=[](uint32_t off)->uint32_t {
+            return *reinterpret_cast<volatile uint32_t *>(gVa[GPB_WIN_GPUCC] + off);
+        };
+        const uint32_t m0=ccRd(GPB_CC_PLL0+GPB_PLL_MODE), l0=ccRd(GPB_CC_PLL0+GPB_PLL_L_VAL);
+        const uint32_t u0=ccRd(GPB_CC_PLL0+GPB_PLL_USER_CTL);
+        const uint32_t m1=ccRd(GPB_CC_PLL1+GPB_PLL_MODE), l1=ccRd(GPB_CC_PLL1+GPB_PLL_L_VAL);
+        const uint32_t u1=ccRd(GPB_CC_PLL1+GPB_PLL_USER_CTL);
+        /* Lucid OLE: VCO = fxo(19.2 MHz) * L, fout = VCO / 2, which is the table's own arithmetic (L 0x16 -> 211, "rounds to 220"). */
+        const unsigned long long f0=19200000ull*(l0&0xffu)/2ull/1000000ull;
+        const unsigned long long f1=19200000ull*(l1&0xffu)/2ull/1000000ull;
+        IOLog("MUYU CLKP pll0 m=%08x l=%08x u=%08x ~%lluMHz | pll1 m=%08x l=%08x u=%08x ~%lluMHz\n",
+              m0,l0,u0,f0,m1,l1,u1,f1);
+    }
+    /* fix118: the BV thread's own view of the world. Every measurement in this port since fix60 has been about the BR thread -
+     * CP_RB_RPTR, CP_IB1_BASE, CP_HW_FAULT and CP_SQE_STAT are all BR's registers - while the stall that kills the frame is
+     * CP_BV_BR_COUNT_OPS, which is BV's handshake. On a7xx the BV thread shares the ring but keeps its own read pointer
+     * (0x0a66), its own IB window (0x0a6d/0x0a70, written by hardware) and, crucially, its own fault and protect-status
+     * registers (0x0a64, 0x0a61) that nothing here has ever read. fix117 handed the CP the client's BV/BR stream untouched
+     * (strip=0, the configuration sheng and uke have always run) and it still parked at CP_BV_BR_COUNT_OPS on the sixth
+     * submission, so the question is no longer what BR does, it is whether BV was ever given an IB at all.
+     * memptrs+8 is bv_rptr as the CPU sees it (NativeAdrenoGpuContext.h: +0 rptr, +4 fence, +8 bv_rptr, +12 bv_fence), so a
+     * zero there after eleven submissions says BV never consumed a single packet. */
+    {
+        const uint32_t bvRptr = gpuRd(0x0a66), bvIb1Lo = gpuRd(0x0a6d), bvIb1Hi = gpuRd(0x0a6e);
+        const uint32_t bvIb1Rem = gpuRd(0x0a70), bvHw = gpuRd(0x0a64), bvProt = gpuRd(0x0a61);
+        const uint32_t bvAvailRb = gpuRd(0x0a8f), bvAvailIb1 = gpuRd(0x0a90), bvAvailIb2 = gpuRd(0x0a91);
+        const uint32_t bvChick = gpuRd(0x0ada), csCntl = gpuRd(0x08a0), csRestore = gpuRd(0x08a3);
+        const uint32_t brRptr = gpuRd(0x0806), brIb1Lo = gpuRd(0x0928), brIb1Hi = gpuRd(0x0929), brIb1Rem = gpuRd(0x092a);
+        const volatile uint32_t *mp = reinterpret_cast<const volatile uint32_t *>(gGpuCpu[2]);
+        const uint32_t mpRptr = mp ? mp[0] : 0xffffffffu, mpFence = mp ? mp[1] : 0xffffffffu;
+        const uint32_t mpBvRptr = mp ? mp[2] : 0xffffffffu, mpBvFence = mp ? mp[3] : 0xffffffffu;
+        IOLog("MUYU BV rptr=%08x ib1=%08x%08x rem=%08x hw=%08x prot=%08x avail=%x/%x/%x chick=%08x cs=%08x rest=%08x | br rptr=%08x ib1=%08x%08x rem=%08x | mp %08x/%08x bv %08x/%08x\n",
+              bvRptr,bvIb1Hi,bvIb1Lo,bvIb1Rem,bvHw,bvProt,bvAvailRb,bvAvailIb1,bvAvailIb2,bvChick,csCntl,csRestore,
+              brRptr,brIb1Hi,brIb1Lo,brIb1Rem,mpRptr,mpFence,mpBvRptr,mpBvFence);
+    }
+    /* fix114: whose value 0x0e17 keeps. fix113 wrote UCHE_CACHE_WAYS from the CPU between submissions and caught it at 0x00800000
+     * immediately after the write and at 0x00000000 eight submissions later, every single time - so something that runs between
+     * passes (a GX power cycle plus its power-up register list, exactly what NativeAdrenoPwrupRegs.h describes) puts it back. The
+     * list itself is our own buffer: 16-byte header, then (register, value) pairs, in gGpuCpu[3]. This prints the entry's current
+     * value - the value every power-up re-applies - and then forces it to BIT(23), the value hw_init writes, so that from here on
+     * the passes run with the ways enabled. Nothing on the GPU is written; the list is host memory the CP reads. */
+    {
+        volatile uint32_t *list = reinterpret_cast<volatile uint32_t *>(gGpuCpu[3]);
+        static unsigned printed;
+        unsigned slot = 0xffffu;
+        uint32_t was = 0;
+        for (unsigned i = 0; i < 16; ++i) if (list[4 + 2 * i] == 0x0e17u) {slot = i; was = list[4 + 2 * i + 1]; break;}
+        if (!printed) {
+            printed = 1;
+            IOLog("MUYU PWL0 hdr=%08x ifpc=%u pre=%u dyn=%u\n", list[3], (unsigned)(list[3] & 0xffu), (unsigned)((list[3] >> 8) & 0xffu),
+                  (unsigned)((list[3] >> 16) & 0xffffu));
+            for (unsigned i = 0; i < 16; i += 8)
+                IOLog("MUYU PWL0 +%u %08x=%08x %08x=%08x %08x=%08x %08x=%08x\n", i,
+                      list[4 + 2 * i], list[5 + 2 * i], list[6 + 2 * i], list[7 + 2 * i],
+                      list[8 + 2 * i], list[9 + 2 * i], list[10 + 2 * i], list[11 + 2 * i]);
+        }
+        if (slot != 0xffffu) {
+            list[4 + 2 * slot + 1] = 1u << 23;
+            __asm__ volatile("dsb sy" ::: "memory");
+            IOLog("MUYU PWL slot=%u reg=%08x was=%08x now=%08x\n", slot, list[4 + 2 * slot], was, list[4 + 2 * slot + 1]);
+        } else IOLog("MUYU PWL no 0e17 entry in the list\n");
+    }
+    IOLog("MUYU SMMUFAULT fsr=%x far=%x fsynr=%x gfsr=%x cbfsr=%x\n", base[(bank0 + 0x58) / 4], base[(bank0 + 0x5C) / 4],
+          base[(bank0 + 0x68) / 4], base[0x48 / 4], base[(bank0 + 0x6C) / 4]);
+    /* fix45: fix44 left the CP stopped at the fence packet of the first submission that carried a real IB, with no SMMU fault, while
+     * four identical fence packets had completed before it. Two very different faults look exactly like that - the CP waiting on
+     * something inside the IB, and the CP not running at all (a collapse it never woke from) - so ask the hardware instead of
+     * guessing: put a one-dword CP_NOP at WPTR, publish the pointer and watch whether RPTR moves. Moving means alive and waiting;
+     * frozen means the ring is not being fetched at all, and the next place to look is the GMU/power state, not the IB. */
+    {
+        static unsigned kicked;
+        if (!kicked) {
+            ++kicked;
+            const uint32_t rptr = gpuRd(A740_CP_RB_RPTR), wptr = gpuRd(A740_CP_RB_WPTR);
+            const uint32_t gx = gVa[GPB_WIN_GPUCC] ?
+                *reinterpret_cast<volatile uint32_t *>(gVa[GPB_WIN_GPUCC] + GPB_CC_GX_GDSCR) : 0;
+            uint32_t after = rptr;
+            /* fix64: READ-ONLY. This probe used to push a one-dword CP_NOP at WPTR and write
+             * CP_RB_WPTR itself. That moved the hardware RPTR one dword past the driver's next_,
+             * so NativeAdrenoRing::submitWords() computed used=(next_-rptr)&mask == ring_size-1
+             * and returned kIOReturnNoResources -> kIOReturnBusy on EVERY later submission.
+             * fix63's own "rptr=74 wptr=74 after=75" proved the CP was alive and had drained
+             * the ring; the very next frame was the first of an endless e00002d5 loop. Polling
+             * RPTR alone answers the same liveness question without corrupting the ring cursor. */
+            for (unsigned i = 0; i < 100; ++i) {IODelay(200); if ((after = gpuRd(A740_CP_RB_RPTR)) != rptr) break;}
+            IOLog("MUYU CPKICK rptr=%x wptr=%x after=%x gdscr=%08x status=%x status3=%x\n", rptr, wptr, after, gx,
+                  gpuRd(A740_RBBM_STATUS), gpuRd(A740_RBBM_STATUS3));
+        }
+    }
+    /* fix46: fix45's kick showed the CP does not fetch at all (RPTR frozen through 20 ms of polls with the GX domain on and no fault), so
+     * the ring, the fence packet and the fetch path are all out and the question is where inside the client's IB the CP sits. CP_IB1_BASE
+     * and CP_IB1_REM answer that directly - an active IB with a non-zero remainder is a CP stopped *inside* the program, a zero base is a
+     * CP stopped between packets.
+     */
+    {
+        static unsigned ibs;
+        if (!ibs) {
+            ++ibs;
+            IOLog("MUYU CPIB ib1=%08x%08x rem=%x ib2=%08x%08x rem2=%x roq=%x/%x\n",
+                  gpuRd(0x0929), gpuRd(0x0928), gpuRd(0x092A), gpuRd(0x092D), gpuRd(0x092B), gpuRd(0x092C),
+                  gpuRd(0x0949), gpuRd(0x094A));
+        }
+    }
+    /* fix47: fix46 left exactly two readings open, and both are answered from the installed table without touching the CP.
+     * (1) Does the table the CP is running map the client's IB? gpuWalk() walks CB0_TTBR0 as it stands right now, so the leaf
+     * descriptor, the physical page and the first two dwords of what the GPU would fetch are the translation and the contents
+     * the CP sees - "no descriptor" and "descriptor, page zeros" are different root causes that the log so far could not tell
+     * apart. (2) Where is the SQE? CP_SQE_STAT_DATA after selecting index 0 is the microcode PC of the BR/BV thread: an idle/WFI
+     * loop means the front end was halted (restart is the only way out), a fetcher loop means it is waiting on the memory system.
+     * CP_HW_FAULT, CP_SQE_CNTL and CP_APERTURE_CNTL_HOST rule out a packet error, a disabled SQE and a host aperture that points
+     * at another hardware context, in that order. Read-only: no register is written except the SQE_STAT index select. */
+    {
+        static unsigned ibw;
+        if (!ibw) {
+            ++ibw;
+            const uint64_t ib = (uint64_t(gpuRd(0x0929)) << 32) | gpuRd(0x0928);
+            uint64_t pa = 0, w0 = 0, w1 = 0;
+            const uint64_t desc = ib ? gpuWalk(ib, &pa) : 0;
+            if (desc) {physRead64(pa, &w0); physRead64(pa + 4, &w1);}
+            gpuWr(0x0908, 0);
+            const uint32_t sqe0 = gpuRd(0x0909), sqe1 = gpuRd(0x0909);
+            gpuWr(0x0a87, 0);
+            const uint32_t bv0 = gpuRd(0x0a88), bv1 = gpuRd(0x0a88);
+            IOLog("MUYU IBW d=%llx pa=%llx w=%08x/%08x sqe=%x/%08x bv=%x/%08x hw=%x ctl=%x ap=%x rb=%x st1=%x co=%u c%x u%x v%x fc=%u/%u/%x/%u wca=%u/%u\n",
+                  (unsigned long long)desc, (unsigned long long)pa, uint32_t(w0), uint32_t(w1), sqe0, sqe1, bv0, bv1,
+                  gpuRd(A740_CP_HW_FAULT), gpuRd(A740_CP_SQE_CNTL), gpuRd(A740_CP_APERTURE_CNTL_HOST),
+                  gpuRd(A740_CP_RB_CNTL), gpuRd(0x0825), (unsigned)native_adreno_coherence[0],
+                  native_adreno_coherence[1], native_adreno_coherence[2], native_adreno_coherence[3],
+                  (unsigned)native_adreno_fix50_clean[0], (unsigned)native_adreno_fix50_clean[1],
+                  (unsigned)native_adreno_fix50_clean[2], (unsigned)native_adreno_fix50_clean[3],
+                  (unsigned)native_adreno_wc_audit[0], (unsigned)native_adreno_wc_audit[2]);
+        }
+    }
 }
 // SIP SMC (qcom_scm-smc.c): x0 function, x1 arginfo, x2.. arguments. QCOM_SCM_INTERRUPTED (1) resumes with x0 = 1 and
 // the returned x6 (ARM_SMCCC_QUIRK_QCOM_A6); QCOM_SCM_V2_EBUSY (-12) retries after 30 ms, at most 20 times. WAITQ_SLEEP
 // (2) needs the SCM wait-queue interrupt, which is not wired here, so it is returned to the caller as is.
 struct ScmRes {int64_t a0; uint64_t a1; uint32_t ms, resumes;};
-ScmRes scmCall(uint64_t fn, uint64_t arginfo, uint64_t p0, uint64_t p1, uint64_t p2) {
+ScmRes scmCall(uint64_t fn, uint64_t arginfo, uint64_t p0, uint64_t p1, uint64_t p2, uint64_t p3 = 0) {
     uint64_t first = fn, a6 = 0;
     const uint64_t start = ringNow(nullptr);
     auto done = [&](int64_t a0, uint64_t a1, unsigned resumes) {
@@ -452,7 +1087,7 @@ ScmRes scmCall(uint64_t fn, uint64_t arginfo, uint64_t p0, uint64_t p1, uint64_t
     };
     for (unsigned resume = 0, busy = 0; resume < 10000;) {
         register uint64_t x0 asm("x0") = first, x1 asm("x1") = arginfo, x2 asm("x2") = p0, x3 asm("x3") = p1;
-        register uint64_t x4 asm("x4") = p2, x5 asm("x5") = 0, x6 asm("x6") = a6, x7 asm("x7") = 0;
+        register uint64_t x4 asm("x4") = p2, x5 asm("x5") = p3, x6 asm("x6") = a6, x7 asm("x7") = 0;
         asm volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
                      :: "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
         if (x0 == 1) {first = 1; a6 = x6; ++resume; continue;}
@@ -466,6 +1101,10 @@ constexpr uint64_t kScmPil(uint32_t cmd) {return 0x42000000u | (0x02u << 8) | cm
 constexpr uint32_t kGpuPasId = 13;                                     // a6xx_gpu.h GPU_PAS_ID
 constexpr uint64_t kZapPhys = 0x9b09a000, kZapBytes = 0x2000;          // sm8550.dtsi gpu_micro_code_mem
 NativeAdrenoMemory gZapMetadata;
+/* fix150: K took the msm -ENODEV path (RBBM_SECVID_TRUST_CNTL = 0). gpuRestart() must replay the
+ * SAME operation, not CP_SET_SECURE_MODE, or a hang recovery would silently introduce the other
+ * experiment's variable into this run. */
+static bool gSecK = false;
 extern "C" {
 // stage, init a0/result, mem_setup a0/result, auth a0/result, secure-mode fence result
 int32_t native_gpu_zap[8];
@@ -477,9 +1116,15 @@ uint32_t rd32le(const uint8_t *p) {return uint32_t(p[0]) | uint32_t(p[1]) << 8 |
 uint16_t rd16le(const uint8_t *p) {return uint16_t(p[0] | p[1] << 8);}
 unsigned zapLimit() {
     // sheng-gpu-zap: 0 off, 1 through init_image, 2 through mem_setup and the segment copy, 3 through auth_and_reset,
-    // 4 (default) also CP_SET_SECURE_MODE 0. int-019 (0) reached the desktop and int-017 (4) did not.
+    // 4 (default) also CP_SET_SECURE_MODE 0. int-019 (0) reached the desktop and int-017 (4) did not - but that
+    // "desktop" was later proven to be the offline-legacy CPU-copy artefact, not a GPU pixel criterion.
     unsigned zap = 4;
     PE_parse_boot_argn("sheng-gpu-zap", &zap, sizeof zap);
+    /* fix152: the command line is at its 1016-byte limit, so the kill switch rides the carrier.
+     * 'L' restores the old no-zap behaviour without a rebuild if the TZ sequence misbehaves. */
+    char carrier[24] = {};
+    if (PE_parse_boot_argn("sheng-tum", carrier, sizeof carrier))
+        for (const char *c = carrier; *c; ++c) if (*c == 'L') return 0;
     return zap;
 }
 void zapRow() {
@@ -493,6 +1138,13 @@ void zapRow() {
     setRow(2, row);
 }
 void zapEnd() {
+    /* fix152: every exit from zapAndSecure() lands here. Log the exact stage and the SECVID state
+     * so a TZ rejection is distinguishable from a successful auth that still left secure mode on. */
+    const int32_t *z = native_gpu_zap;
+    IOLog("MUYU ZAPEND stage=%d limit=%u init=%d mem=%d auth=%d wait=%d size=%llu trust=%08x tsb=%08x%08x\n",
+          z[0], zapLimit(), z[1], z[3], z[5], z[7],
+          (unsigned long long)native_adreno_zap_image_size,
+          gpuRd(0xf400), gpuRd(0xfc01), gpuRd(0xfc00));
     IOSleep(2000);
     native_gpu_zap_free[1] = &vm_page_free_count ? vm_page_free_count : 0;
     zapRow();
@@ -501,11 +1153,66 @@ void zapAndSecure() {
     int32_t *z = native_gpu_zap;
     native_gpu_zap_free[0] = native_gpu_zap_free[1] = &vm_page_free_count ? vm_page_free_count : 0;
     z[0] = 1; zapRow();
-    const uint8_t *fw = &native_adreno_zap_image_size ? native_adreno_zap_image : nullptr;
-    const uint64_t size = fw ? native_adreno_zap_image_size : 0;
+    /* fix152: the image is now a strong definition in this translation unit, so the old
+     * weak-symbol probe (&size ? image : nullptr) is always true and -Werror rejects it. */
+    const uint8_t *fw = native_adreno_zap_image;
+    const uint64_t size = native_adreno_zap_image_size;
     // mdt_header_valid: ELF32 magic, 32-byte program headers inside the file; qcom_mdt_read_metadata: >= 2 headers, the
     // first not PT_LOAD, a hash segment (p_flags type 2 in bits 24..26).
-    if (size < 52 || fw[0] != 0x7f || fw[1] != 'E' || fw[2] != 'L' || fw[3] != 'F' || fw[4] != 1) {z[0] = -1; zapRow(); return;}
+    /* fix150: the 17 line links the weak empty zap default, so this branch is the normal path and
+     * CP_SET_SECURE_MODE (0x66) is never emitted: the two senders are zapAndSecure() itself (skipped
+     * right here) and gpuRestart() (gated on native_gpu_zap[0] == 9). Linux msm emits 0x66 after a
+     * successful zap load to take the CP out of secure mode; a CP left in secure mode would explain
+     * GX-side stores vanishing with no SMMU fault, no GBIF halt and no stall, while CX-side fence
+     * writes still land. History demoted this line because "zap=0 still reached the desktop", but
+     * that desktop was later proven to be a CPU-copy artefact, so it was never tested against a
+     * hard pixel criterion. J is a single-variable probe: send 0x66 with NO zap shader and NO TZ/SMC
+     * call at all, at exactly the bring-up point msm uses (c[0]==10 scratch write + fence done,
+     * before the first client submit). Everything else stays byte-identical to the swCD baseline.
+     *   RBBM_SECVID_TRUST_CNTL 0xf400, TSB_STATUS 0xfc00/1 (A7XX-only), TSB_CNTL 0xf803,
+     *   TSB_TRUSTED_BASE 0xf800/1, TSB_TRUSTED_SIZE 0xf802 - all inside the 0x40000 GPU window. */
+    if (size < 52 || fw[0] != 0x7f || fw[1] != 'E' || fw[2] != 'L' || fw[3] != 'F' || fw[4] != 1) {
+        char carrier[24] = {};
+        bool secJ = false, secK = false;
+        if (PE_parse_boot_argn("sheng-tum", carrier, sizeof carrier))
+            for (const char *c = carrier; *c; ++c) {
+                if (*c == 'J') secJ = true;
+                if (*c == 'K') secK = true;
+            }
+        const uint32_t trust = gpuRd(0xf400), tsbLo = gpuRd(0xfc00), tsbHi = gpuRd(0xfc01);
+        const uint32_t tsbCntl = gpuRd(0xf803), baseLo = gpuRd(0xf800), baseHi = gpuRd(0xf801), baseSz = gpuRd(0xf802);
+        IOLog("MUYU SECZ size=%llu J=%u K=%u trust=%08x tsb=%08x%08x cntl=%08x base=%08x%08x sz=%08x\n",
+              (unsigned long long)size, secJ ? 1u : 0u, secK ? 1u : 0u,
+              trust, tsbHi, tsbLo, tsbCntl, baseHi, baseLo, baseSz);
+        if (!secJ && !secK) {z[0] = -1; zapRow(); return;}
+        /* msm a6xx_gpu.c:1507-1517: when a6xx_zap_shader_init() returns -ENODEV (this board links
+         * the empty weak zap image), the ONLY supported way out of secure mode is a plain CPU write
+         * of RBBM_SECVID_TRUST_CNTL = 0. K does exactly that, with no CP packet and no SMC call.
+         * J is the other msm branch (1500-1506): CP_SET_SECURE_MODE(0) after a *successful* zap
+         * load. Kept as a separate carrier for the next round if K is not sufficient. */
+        if (secK) {
+            gpuWr(0xf400, 0x0);
+            __asm__ volatile("dsb sy" ::: "memory");
+            const uint32_t readback = gpuRd(0xf400);
+            const uint32_t tsbLo2 = gpuRd(0xfc00), tsbHi2 = gpuRd(0xfc01);
+            gSecK = true;
+            z[0] = 9;   // gpuRestart() then replays the same *write* (see gSecK), not 0x66
+            IOLog("MUYU SECK wr=0 readback=%08x tsb=%08x%08x stage=%d\n", readback, tsbHi2, tsbLo2, z[0]);
+            zapRow();
+            return;
+        }
+        uint32_t words[2] = {};
+        uint32_t fence = 0, seen = 0;
+        if (AdrenoPM4Type7(0x66, 1, &words[0]) != AdrenoPM4Success || gRing.submit(words, 2, &fence)) {z[0] = -11; zapRow(); return;}
+        const NativeAdrenoRingClock clock{nullptr, ringNow, ringIdle};
+        z[7] = int32_t(gRing.wait(fence, &clock, 200000, &seen));
+        z[0] = z[7] ? 8 : 9;   // 9: the CP left secure mode without a zap shader
+        const uint32_t trust2 = gpuRd(0xf400), tsbLo2 = gpuRd(0xfc00), tsbHi2 = gpuRd(0xfc01);
+        IOLog("MUYU SECJ wait=%d seen=%u stage=%d trust=%08x tsb=%08x%08x\n",
+              z[7], seen, z[0], trust2, tsbHi2, tsbLo2);
+        zapRow();
+        return;
+    }
     const uint32_t phoff = rd32le(fw + 28);
     const unsigned phent = rd16le(fw + 42), phnum = rd16le(fw + 44);
     if (phent != 32 || phnum < 2 || phnum > 16 || phoff + uint64_t(phnum) * 32 > size) {z[0] = -2; zapRow(); return;}
@@ -579,6 +1286,8 @@ void zapAndSecure() {
     const NativeAdrenoRingClock clock{nullptr, ringNow, ringIdle};
     z[7] = int32_t(gRing.wait(fence, &clock, 200000, &seen));
     z[0] = z[7] ? 8 : 9;   // 9: TZ authenticated the zap shader and the CP left secure mode
+    IOLog("MUYU ZAPOK stage=%d wait=%d seen=%u trust=%08x tsb=%08x%08x\n",
+          z[0], z[7], seen, gpuRd(0xf400), gpuRd(0xfc01), gpuRd(0xfc00));
     zapEnd();
 }
 extern "C" {
@@ -851,22 +1560,27 @@ void ucStress() {
     snprintf(row, sizeof row, "K a%u f%u L%x s%u v%d J%u y%u m%d r%x t%u", mapped, freed, unsigned(bigStatus) & 0xfff, spans,
              bigWords, submitted, busy, burstMatch, unsigned(retiredWait) & 0xfff, mapMs);
     setRow(7, row);
+    // Same reason as MUYU USELFTEST above: J jobs submitted, m whether the CP actually wrote the burst target, r the wait status on the
+    // oldest fence. m=0 with J=20 is "the ring accepted work nothing executed".
+    IOLog("MUYU UCRING %s\n", row);
 }
 void userClientTest() {
     uint32_t *u = native_gpu_uc;
     char row[64];
     NativeAdrenoVm *vm = NativeAdrenoGpuContextVm ? NativeAdrenoGpuContextVm() : nullptr;
-    if (!vm) {setRow(6, "U novm"); return;}
+    if (!vm) {setRow(6, "U novm"); IOLog("MUYU USELFTEST U novm\n"); return;}
     IOReturn err = 0;
     int errAt = -1, ok = 0, n = 0;
     const IOReturn attached = gSubmit.attach(vm, &gRing);
-    // input_bits 31: the 2 GiB TTBR0 aperture; output_bits 40 for the BO allocations
-    const IOReturn opened = attached ? attached : gClient.open(NativeAdrenoAbiVersion, vm, &gSubmit, &gRing, 31, 40);
+    /* Same number the service is published with: NativeAdrenoUserClient::open() rejects anything outside 32..48 too, so the old literal
+     * 31 was wrong on both sides. */
+    const unsigned ias = NativeAdrenoGpuContextInputBits ? NativeAdrenoGpuContextInputBits() : 40;
+    const IOReturn opened = attached ? attached : gClient.open(NativeAdrenoAbiVersion, vm, &gSubmit, &gRing, ias, 40);
     u[0] = uint32_t(attached);
     u[1] = uint32_t(opened);
-    if (opened) {snprintf(row, sizeof row, "U open a%x o%x", u[0], u[1]); setRow(6, row); return;}
+    if (opened) {snprintf(row, sizeof row, "U open a%x o%x", u[0], u[1]); setRow(6, row); IOLog("MUYU USELFTEST %s\n", row); return;}
     NativeAdrenoAbiParams params{};
-    if (!ucCall(NativeAdrenoMethodQuery, nullptr, &params)) ok += params.input_bits == 31 && params.output_bits == 40;
+    if (!ucCall(NativeAdrenoMethodQuery, nullptr, &params)) ok += params.input_bits == ias && params.output_bits == 40;
     ++n;
     const uint32_t irq0 = gIrqCount;
     // Round 2 reuses the IB address with a new object (a stale TLB entry would run the old IB, which writes to the now
@@ -888,13 +1602,24 @@ void userClientTest() {
     snprintf(row, sizeof row, "U ok%d/%d e%x@%d v%d/%d q%u c%x s%x G%x", ok, n, unsigned(err), errAt, v1, v2, u[6],
              unsigned(closed), gpuFsr(), u[7]);
     setRow(6, row);
+    // 2026-11-14 01:4x, fix37: the display chain now accepts and scans out the renderer's 10-bit surface (fix34-36), but every surface
+    // arrives zero and backboardd's first frame dies in WaitFence (MUYU GFXFAIL m=6). Whether the GPU executes at all was only ever visible
+    // on the boot page: q is the GPU interrupt count during this in-kernel submission round, v1/v2 the dwords the CP wrote back. If q stays
+    // 0 and v does not match, no counter or ring change below can matter.
+    IOLog("MUYU USELFTEST %s\n", row);
 }
 NativeAdrenoTimer gTimer;
-// Constant facts for the Vulkan driver, each from a pinned source: chip id and gmem from a6xx_catalog.c (a740, "C510v2"),
-// UBWC 4.0 / swizzle levels 2+3 / bank bit 16 / macrotile from ubwc_config.c sm8550_data, the GMEM window and trap base from the
-// values hw_init programs above. The VA window keeps clear of the kernel buffers (below 0x302000+) and the GMEM window
-// (0x1000000..0x12fffff) and ends at the 2 GiB aperture.
-const NativeAdrenoAbiDeviceInfo gDeviceInfo = {0x43050a01u, 3u << 20, 0x1000000ull, 0x1fffffffff000ull, 0x20000000ull,
+// Constant facts for the Vulkan driver. fix64: this board is an Adreno 735 (DT qcom,gpu-model,
+// qcom,chipid 0x43030b00, gen7-11-0, 1.5 MiB GMEM), NOT the A740 the sheng line was cloned from.
+// mesa's freedreno_devices.py has GPUId(chip_id=0x43030B00, name="FD735") with num_ccu=3 and its own
+// magic_regs (UCHE_CACHE_WAYS=0, PC_UNKNOWN_9E24=0x01585600); reporting 0x43050a01 made Turnip take the
+// FD740 entry (num_ccu=6, UCHE_CACHE_WAYS=0x00040004, PC_UNKNOWN_9E24=0x21585600) and write A740
+// register values into an A735 part - fix63's MUYU IB dump shows exactly those A740 words.
+// fd_dev_info_raw() compares by chip_id for a table entry whose gpu_id is 0 (GPU-HANDOFF.md §35.2),
+// so tu_knl_darwin.cc's leftover gpu_id=740 special case does not break device enumeration.
+// UBWC 4.0 / swizzle levels 2+3 / bank bit 16 / macrotile from ubwc_config.c sm8550_data; the VA window
+// keeps clear of the kernel buffers and the GMEM window and ends at the 2 GiB aperture.
+const NativeAdrenoAbiDeviceInfo gDeviceInfo = {0x43030b00u, 0x180000u, 0x1000000ull, 0x1fffffffff000ull, 0x20000000ull,
                                                0x60000000ull, 16, 6, 1, 4, NativeAdrenoDeviceClientIova, 0};
 int timerRead(void *, uint32_t reg, uint32_t *value) {*value = gpuRd(reg); return 0;}
 const NativeAdrenoTimeIo gTimerIo{nullptr, timerRead};
@@ -933,7 +1658,8 @@ int wrapperRound(IOService *svc, int &ok, int &n, IOReturn &err, int &errAt, uin
     step(wcall(uc, NativeAdrenoMethodQuery, nullptr, &params));
     NativeAdrenoAbiDeviceInfo info{};
     step(wcall(uc, NativeAdrenoMethodGetDeviceInfo, nullptr, &info));
-    step(info.chip_id == 0x43050a01u && info.gmem_bytes == (3u << 20) ? 0 : kIOReturnError);
+    /* fix64: the device identity is the board's A735, not the cloned A740. */
+    step(info.chip_id == 0x43030b00u && info.gmem_bytes == 0x180000u ? 0 : kIOReturnError);
     NativeAdrenoAbiBoAlloc alloc{4096, 12, 0};
     NativeAdrenoAbiBoAllocReply ib{}, tgt{};
     int matched = -1;
@@ -999,6 +1725,22 @@ int wrapperRound(IOService *svc, int &ok, int &n, IOReturn &err, int &errAt, uin
     uc->release();
     return matched;
 }
+/* qcom_scm_set_gpu_smmu_aperture(0): the secure world opens the CP's aperture to the GPU's context bank 0, which is what makes
+ * CP_SMMU_TABLE_UPDATE in the ring able to switch the bank's table (per-process address spaces, NativeAdrenoSubmit table mode 2).
+ * Without it NativeAdrenoPublish's tableMode() falls back to 1, the CPU writing TTBR0 with the GPU idle - a path msm keeps only for
+ * targets without the aperture, and the one the first client submission hung on (RPTR 0x3f frozen, RBBM_STATUS3 SMMU stalled,
+ * no fault latched). Asked first whether the call exists (QCOM_SCM_INFO_IS_CALL_AVAIL).
+ * native_adreno_cp_aperture: [0] availability (x1, or 0x80000000|x0 on error), [1] the call's x0. */
+extern "C" volatile uint32_t native_adreno_cp_aperture[4];
+void openCpAperture() {
+    // ARM_SMCCC_CALL_VAL(STD, SMC_64, OWNER_SIP, svc << 8 | cmd): SVC_INFO 0x06 / IS_CALL_AVAIL 0x01, SVC_MP 0x0c / CP_SMMU_APERTURE_ID 0x1b.
+    const ScmRes avail = scmCall(0x42000601u, 1, 0x02000000u | (0x0cu << 8) | 0x1bu, 0, 0);
+    native_adreno_cp_aperture[0] = avail.a0 ? 0x80000000u | uint32_t(avail.a0) : uint32_t(avail.a1);
+    if (avail.a0 || !avail.a1) {native_adreno_cp_aperture[1] = 0xffffffffu; return;}
+    // args[0] = 0xffff0000 | QCOM_SCM_CP_APERTURE_REG (0) << 8 | context bank; the other three 0xffffffff. ARGS(4), all values.
+    const ScmRes r = scmCall(0x42000c1bu, 4, 0xffff0000u | (0u << 8) | 0u, 0xffffffffu, 0xffffffffu, 0xffffffffu);
+    native_adreno_cp_aperture[1] = uint32_t(r.a0);
+}
 void publishAndWrapperTest(bool rounds) {
     char row[64];
     if (!native_adreno_publish || !native_adreno_published_service || !native_adreno_publish_stats) {setRow(5, "P nolink"); return;}
@@ -1006,9 +1748,40 @@ void publishAndWrapperTest(bool rounds) {
     const NativeAdrenoRingClock clock{nullptr, ringNow, ringIdle};
     // userClientTest attaches the submit object; with the self-tests skipped it still has to be attached before a client opens.
     if (vm) gSubmit.attach(vm, &gRing);
+    /* fix119: hand the submit object the switch, when gpuStart built it. Same wiring as uke's publishAndWrapperTest
+     * (UniXNU-uke/package/GpuPowerProbe.cpp:1303-1312): the trigger registers through the GPU window (preemptWrite, AHB-fence
+     * checked), the GMU keepalive vote by dword offset, each ring's record and SMMU-info page by GPU address, and the clock the
+     * switches are timed with. ring_count_ only becomes 2 here, so this is also the switch that makes priority routing real. */
+    if (vm && gPreemptWanted) {
+        NativeAdrenoSubmit::PreemptSetup setup{};
+        setup.io = NativeAdrenoPreemptIo{nullptr, preemptWrite, ringRead, ringBarrier, nullptr, gmuWrAt};
+        setup.pages.record[0] = gGpuBuffers[5].iova; setup.pages.record[1] = gGpuBuffers[6].iova;
+        setup.pages.smmu_info[0] = gGpuBuffers[7].iova; setup.pages.smmu_info[1] = gGpuBuffers[8].iova;
+        setup.pages.record_cpu[0] = const_cast<uint8_t *>(gGpuCpu[5]); setup.pages.record_cpu[1] = const_cast<uint8_t *>(gGpuCpu[6]);
+        setup.pages.smmu_cpu[0] = const_cast<uint8_t *>(gGpuCpu[7]); setup.pages.smmu_cpu[1] = const_cast<uint8_t *>(gGpuCpu[8]);
+        setup.now = ringNow; setup.clock = nullptr; setup.mode = gPreemptMode;
+        const IOReturn on = gSubmit.setPreemption(&gRing, &gRing1, setup, true);
+        IOLog("MUYU PREEMPT submit on=%x mode=%u\n", unsigned(on), gPreemptMode);
+    }
     native_adreno_dram_read32 = dramRead32;
+    /* fix123.2: the panel surface, mapped once. */
+    native_adreno_frame_window = frameWindow;
+    /* fix50: install the two missing halves of the coherence protocol. */
+    native_adreno_cached_read32 = cachedRead32;
+    /* fix103: and the write half, for the canary the submit path plants in the swap surface. */
+    native_adreno_dram_write32 = dramWrite32;
+    native_adreno_line_audit = lineAudit;
     const IOReturn timer = gTimer.attach(&gTimerIo, NativeAdrenoTimeCp);
-    const IOReturn published = native_adreno_publish(vm, &gSubmit, &gRing, &clock, timer ? nullptr : &gTimer, &gDeviceInfo, 31, 40);
+    /* The aperture the context bank was really programmed with, not a literal: NativeAdrenoPublish hands every user connection the range
+     * [GpuClientVaStart, 2^input_bits), so input_bits=31 (the old literal) left no window and each open was refused (mount_fail 3/x1).
+     * output_bits stays 40: it only caps BO allocations, which the self-test already proved at this size. */
+    const unsigned ias = NativeAdrenoGpuContextInputBits ? NativeAdrenoGpuContextInputBits() : 0;
+    muyu_gpu_bits[0] = ias;
+    muyu_gpu_bits[1] = 40;
+    if (!ias) {setRow(5, "P no ias"); return;}
+    /* Before publish: tableMode() reads cp_aperture at that moment, and only an answered aperture call selects the CP-side switch. */
+    openCpAperture();
+    const IOReturn published = native_adreno_publish(vm, &gSubmit, &gRing, &clock, timer ? nullptr : &gTimer, &gDeviceInfo, ias, 40);
     IOService *svc = published ? nullptr : native_adreno_published_service();
     int ok = 0, n = 0, errAt = -1, v1 = -1, v2 = -1;
     IOReturn err = 0;
@@ -1061,6 +1834,7 @@ void publishMetal() {
     // The two keys the original _MTLRegisterDevices helper reads. The plugin name is ours: the bundle exists only through the
     // addon mount, and no Apple device identity (gpu,t8011 and the like) is claimed.
     accelerator->setProperty("MetalPluginName", "NativeAdrenoMetal");
+    accelerator->setProperty("NativeSandboxGrantProcess", "backboardd,iconservicesagent,WidgetRenderer_Default,PosterBoard");
     accelerator->setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
     gMetalStage = 4;
     if (!accelerator->attach(IOService::getPlatform())) {accelerator->release(); gMetalStatus = kIOReturnNotAttached; return;}
@@ -1093,6 +1867,30 @@ void metalRows() {
              gMetalStage, unsigned(gMetalStatus), gMetalRegistered, d.opens, d.busy, d.closes, d.name_reads, gDaemonSeen, gDaemonAlive,
              gDaemonPid, gProcTotal);
     setRow(6, row);
+    // 2026-11-13 23:1x: the row above only ever reached boot_progress_ext, so a boot that reset at ~197 s said nothing about why no GPU
+    // client arrived. Mirror it into msgbuf (rate limited: the heartbeat calls this repeatedly) so the persistent window carries it.
+    {
+        static unsigned logged = 0;
+        if (++logged <= 3 || (logged % 32) == 0) IOLog("MUYU METAL %s\n", row);
+    }
+    // 2026-11-14 00:5x, history check: the same driver on the physical 17-line boot printed "o3/0/0 n2" (three plugin opens, two
+    // MetalPluginName reads, GPU-HANDOFF §30). Every round of this harness since fix15 says "o0/0/0 n0" while backboardd does open the
+    // accelerator with type 1. The M row cannot separate "nobody queried the node" from "a connection was granted and then asked for
+    // methods", so print both here: p<n property reads of any key> n<MetalPluginName reads> <newest reader>, plus the last selector that
+    // reached the driver with its declared sizes and the selector bitmap. Logged only when a counter moves, and capped: a client that
+    // polls in a loop must not own the window.
+    {
+        static uint32_t seen_entries = 0, seen_reads = 0;
+        static unsigned logged = 0;
+        if (logged < 24 && (d.ext_entries != seen_entries || d.property_reads != seen_reads)) {
+            ++logged;
+            seen_entries = d.ext_entries; seen_reads = d.property_reads;
+            IOLog("MUYU ABI x%u p%u n%u %s s%u/%x in%u out%u b%08x%08x%08x%08x\n",
+                d.ext_entries, d.property_reads, d.name_reads, d.reader[0],
+                d.ext_selector, d.ext_status, d.ext_in, d.ext_out,
+                d.sel_bits[0], d.sel_bits[1], d.sel_bits[2], d.sel_bits[3]);
+        }
+    }
     // Row 7: the plugin's progress markers (open types 0x4147xxxx), oldest first: 1 started, 2 symbols, 3 opened, 1xxx probe
     // (xxx admitted selectors), 2000/2001 mailbox failed/ok, 3xxx step xxx done, 4xxx step failed (xxx = status), 5xxx reported;
     // after 4F01 the two halves of the failed open's kern_return_t.
@@ -1105,6 +1903,9 @@ void metalRows() {
     setRow(7, row);
     // GPU7/GPU8 (wide): the raw test's report line and the Turnip phase's line (T result or W watchdog sample).
     if (d.report[0]) snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "R %.63s", d.report);
+    /* The bridge's own last line, for the console dump: when backboardd's plugin gives up at native_bridge_metal_open it streams
+     * "PUB no device: <nmb_last_error()>" into report2, and nothing else on screen carries that string. */
+    if (d.report2[0]) {memcpy(muyu_gpu_reason, d.report2, sizeof muyu_gpu_reason - 1); muyu_gpu_reason[sizeof muyu_gpu_reason - 1] = 0;}
     if (d.report2[0]) snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.63s", d.report2);
     {
         // Row 5: the newest four IOServiceOpen attempts as <process><P plugin type|F other type><MACF result of the sandbox>; 0 = admitted.
@@ -1239,14 +2040,161 @@ void ipiSelfTest() {
     gicRow();
 }
 void startHeartbeatThread();
+
+/* stage3 pure observation: which hwcg value table and GMEM window hw_init actually wrote.
+ * Declared after the includes so uint32_t is visible under -nostdlibinc. */
+extern "C" {volatile uint32_t native_adreno_hwinit_probe[8];}
+
+/* §38 (2026-11-12): hw_init extracted from gpuStart's step 3, verbatim, so the hang restart can replay it
+ * the way msm's a6xx_recover calls msm_gpu_hw_init (and the way UniXNU-uke/package/GpuPowerProbe.cpp:1560
+ * does). Only the step counter c[0]=3 stays in gpuStart. */
+void gpuHwInit() {
+    gpuWr(A740_GBIF_HALT, 0); (void)gpuRd(A740_GBIF_HALT);
+    gpuWr(A740_RBBM_GBIF_HALT, 0); (void)gpuRd(A740_RBBM_GBIF_HALT);
+    gpuWr(A740_RBBM_SECVID_TSB_CNTL, 0);
+    gpuWr64(A740_RBBM_SECVID_TSB_TRUSTED_BASE, 0);
+    gpuWr(A740_RBBM_SECVID_TSB_TRUSTED_SIZE, 0);
+    gmuWr(A740_GPU_GMU_AO_GMU_CGC_MODE_CNTL, 0x00020202);
+    gmuWr(A740_GPU_GMU_AO_GMU_CGC_DELAY_CNTL, 0x10111);
+    gmuWr(A740_GPU_GMU_AO_GMU_CGC_HYST_CNTL, 0x5555);
+    if (gpuRd(A740_RBBM_CLOCK_CNTL) != 0x8aa8aa82) {
+        for (unsigned i = 0; i < NATIVE_ADRENO_A740_HWCG_COUNT; ++i) gpuWr(NativeAdrenoA740Hwcg[i][0], NativeAdrenoA740Hwcg[i][1]);
+        gpuWr(A740_RBBM_CLOCK_CNTL, 0x8aa8aa82);
+        native_adreno_hwinit_probe[0]=1;   /* this pass applied the GEN2 family table */
+    } else native_adreno_hwinit_probe[0]=2; /* clock already matched, table skipped */
+    native_adreno_hwinit_probe[2]=NATIVE_ADRENO_A740_HWCG_COUNT;
+    native_adreno_hwinit_probe[3]=1;       /* 1 = GEN2 a740_hwcg; 2 was the GEN1 a730_hwcg mislabelled A735 */
+    native_adreno_hwinit_probe[4]=native_adreno_hwinit_probe[4]+1;
+    gpuWr(A740_RBBM_GBIF_CLIENT_QOS_CNTL, 0x2120212);
+    gpuWr(A740_UCHE_GBIF_GX_CONFIG, 0x10240e0);
+    gpuWr(A740_RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffff);
+    gpuWr64(A740_UCHE_TRAP_BASE, 0x1fffffffff000ull);
+    gpuWr64(A740_UCHE_WRITE_THRU_BASE, 0x1fffffffff000ull);
+    gpuWr64(A740_UCHE_GMEM_RANGE_MIN, 0x1000000);
+    /* fix6 (2026-11-13 20:00): back to the 3 MiB window that stage3 used.
+     * Evidence is on-panel and single-variable: stage3 (gr=12fffff, 3 MiB) gave
+     * calls=2 then calls=1 with the same GEN2 a740_hwcg table (hn=54, hw=1);
+     * fix2/fix4/fix5 (gr=117ffff, the 1.5 MiB window from board.toml) gave
+     * calls=0 on every boot. fix4 kept the 10 ms OOB budget and still lost the
+     * offer, so the budget is not the variable - this window is.
+     * board.toml gmem_bytes stays untouched; it is a description of the board,
+     * not the CP's view of the aperture, and it was never moved before fix2. */
+    gpuWr64(A740_UCHE_GMEM_RANGE_MAX, 0x1000000 + 0x300000 - 1);
+    native_adreno_hwinit_probe[1]=0x1000000u + 0x300000u - 1u;
+    native_adreno_hwinit_probe[5]=0x1000000u;
+    gpuWr(A740_UCHE_CACHE_WAYS, 1u << 23);
+    gpuWr(A740_CP_AHB_CNTL, 0x1);
+    gpuWr(A740_RBBM_PERFCTR_CNTL, 0x1);
+    gpuWr(A740_RBBM_INTERFACE_HANG_INT_CNTL, (1u << 30) | 0xcfffff);
+    gpuWr(A740_UCHE_CLIENT_PF, (1u << 7) | 0x1);
+    gpuWr(A740_CP_PROTECT_CNTL, (1u << 0) | (1u << 1) | (1u << 3));
+    for (unsigned i = 0; i < NATIVE_ADRENO_A740_PROTECT_COUNT; ++i)
+        gpuWr(A740_CP_PROTECT + NativeAdrenoA740Protect[i][0], NativeAdrenoA740Protect[i][1]);
+    gpuWr(A740_UCHE_CMDQ_CONFIG, (6u << 16) | (6u << 12) | (9u << 8) | (1u << 3) | (1u << 2) | 2u);
+    gpuWr(A740_CP_APRIV_CNTL, 0x6f);
+    gpuWr(A740_CP_BV_APRIV_CNTL, 0x0f);
+    gpuWr(A740_CP_LPAC_APRIV_CNTL, 0x0f);
+    gpuWr(A740_RB_CMP_DBG_ECO_CNTL, gpuRd(A740_RB_CMP_DBG_ECO_CNTL) | (1u << 11));
+    gpuWr(A740_RB_NC_MODE_CNTL, (1u << 11) | (1u << 4) | (3u << 1));
+    gpuWr(A740_TPL1_NC_MODE_CNTL, 3u << 1);
+    gpuWr(A740_SP_NC_MODE_CNTL, (2u << 4) | (3u << 1));
+    for (uint32_t pipe = 1; pipe <= 2; ++pipe) {
+        gpuWr(A740_CP_APERTURE_CNTL_HOST, pipe << 12);
+        gpuWr(A740_GRAS_NC_MODE_CNTL, 3u << 5);
+    }
+    gpuWr(A740_CP_APERTURE_CNTL_HOST, 0);
+    gpuWr(A740_UCHE_MODE_CNTL, 3u << 21);
+    gpuWr(A740_RBBM_NC_MODE_CNTL, 1);
+    gpuWr(A740_RBBM_INT_0_MASK, 0x33d283c2);
+    gpuWr64(A740_CP_SQE_INSTR_BASE, gGpuBuffers[0].iova);
+}
+extern "C" void native_adreno_set_restart(NativeAdrenoRestart, void *) __attribute__((weak));
+
+/* §38: the 17-line port never registered a restart hook, so NativeAdrenoPublish's hangcheck counted 32 hangs
+ * and zero restarts while the ring stayed frozen (H h32 r0 r0). Port of uke's gpuRestart: drain GBIF including
+ * the GX side, assert RBBM_SW_RESET_CMD for >100 us, replay hw_init, restart the ring at the completed fence,
+ * re-run CP_ME_INIT through the ring and leave secure mode again if the zap shader was authenticated. The GMU
+ * keeps its OOB GPU_SET vote; a full GMU power cycle is not available on this board. */
+IOReturn gpuRestart(void *, NativeAdrenoRing *ring, uint32_t completed) {
+    uint32_t *r = native_gpu_restart;
+    uint32_t *d = native_gpu_restart2;
+    r[0] = r[0] + 1;
+    auto fail = [&](uint32_t step, IOReturn status) {r[1] = step; r[2] = uint32_t(status); return status ? status : kIOReturnIOError;};
+    /* §43: read-only snapshots, printed as MUYU RT2. §40 proved restart() succeeds (RT n1 s0 e0) while the fence
+     * stays at 4; these four RPTR samples decide whether the CP never moved or moved and stalled again. */
+    d[0] = uint32_t(native_gpu_zap[0]);
+    d[1] = zapLimit();
+    d[2] = gpuRd(A740_CP_RB_RPTR);
+    d[3] = gpuRd(A740_CP_RB_WPTR);
+    if (!ring) return fail(1, kIOReturnBadArgument);
+    if (gxOn()) gpuWr(A740_CP_SQE_CNTL, 3);
+    IOReturn status = ring->busHalt(true, 1000000);
+    if (status) return fail(2, status);
+    gpuWr(A740_RBBM_SW_RESET_CMD, 1); (void)gpuRd(A740_RBBM_SW_RESET_CMD); IODelay(1);
+    IODelay(100);
+    gpuWr(A740_RBBM_SW_RESET_CMD, 0); (void)gpuRd(A740_RBBM_SW_RESET_CMD); IODelay(1);
+    r[3] = gpuRd(A740_RBBM_STATUS);
+    gpuHwInit();
+    status = ring->restart(completed);
+    d[4] = gpuRd(A740_CP_RB_RPTR);
+    if (status) return fail(3, status);
+    gpuWr64(A740_CP_BV_RB_RPTR_ADDR, gGpuBuffers[2].iova + 8);
+    gpuWr(A740_CP_SQE_CNTL, 1);
+    const NativeAdrenoRingIo rio{nullptr, ringWrite, ringRead, ringBarrier, nullptr, nullptr};
+    const NativeAdrenoCpInitConfig config{gGpuBuffers[0].iova, gGpuBuffers[3].iova, 1};
+    const NativeAdrenoRingClock clock{nullptr, ringNow, ringIdle};
+    NativeAdrenoCpInit init;
+    uint32_t fence = 0;
+    status = init.run(&rio, ring, &config, &fence, false);
+    d[5] = gpuRd(A740_CP_RB_RPTR);
+    if (status) return fail(4, status);
+    status = ring->idle(&clock, 1000000);
+    if (status) return fail(5, status);
+    if (native_gpu_zap[0] == 9) {
+        if (gSecK) {
+            /* fix150: replay the same msm -ENODEV operation, never the other carrier's 0x66. */
+            gpuWr(0xf400, 0x0);
+            __asm__ volatile("dsb sy" ::: "memory");
+        } else {
+            uint32_t words[2] = {};
+            if (AdrenoPM4Type7(0x66, 1, &words[0]) != AdrenoPM4Success) return fail(6, kIOReturnInternalError);
+            status = ring->submitUnfenced(words, 2);
+            if (!status) status = ring->idle(&clock, 1000000);
+            if (status) return fail(6, status);
+        }
+    }
+    r[1] = 0; r[2] = 0;
+    uint32_t fenceValue = 0;
+    (void)ring->fenceValue(&fenceValue);
+    d[6] = fenceValue;
+    d[7] = gpuRd(A740_CP_RB_RPTR);
+    d[8] = gpuRd(A740_CP_RB_WPTR);
+    d[9] = gSmmuMap ? *reinterpret_cast<volatile uint32_t *>(gSmmuMap->getVirtualAddress() + 0x48) : 0xdeadbeef;
+    return kIOReturnSuccess;
+}
+
 void gpuStart() {
     char row[64];
     uint32_t *c = native_gpu_cp;
     if (!NativeAdrenoGpuContextBringup || !NativeAdrenoGpuContextBuffers || !gSmmuMap) {setRow(6, "Q nolink"); return;}
-    // 1. The GPU's own context bank and buffers (arm-smmu-qcom: the GPU always gets bank 0; DT iommus SIDs 0 and 1).
+    // 1. The GPU's own context bank and buffers (arm-smmu-qcom: the GPU always gets bank 0).
+    // This board's DTS (Mu-Silicium/Resources/DTBs/muyu.dts qcom,kgsl-iommu@3da0000)
+    // names gfx3d_user SID 0, gfx3d_secure SID 2, and qcom,gmu@3d69000 SID 5 - NOT
+    // uke's "SIDs 0 and 1". Only SID 0 (slot 0 -> bank 0) and SID 5 (slot 2 -> bank 1)
+    // are routed; SID 2 is unmatched, but that is NOT a lease we may take back:
+    /* fix141 (2026-11-15) HARD HANG, do not retry: leasing a SECOND SMR/S2CR route
+     * - even the DTS-correct SID 2 into an empty slot 3 - wedges the SMMU during
+     * ArmSmmu4KAttachStreams exactly as the 2026-11-11 slot-1/SID-1 attempt did.
+     * 420 s with no watchdog restart, USB vanished, neither adb nor fastboot
+     * enumerates, `adb reboot` refuses: only a physical 10-15 s power hold recovers.
+     * So the hang is caused by writing a second route at all, not by the SID or slot.
+     * The "GX traffic is an unmatched SID 2" hypothesis is therefore UNTESTABLE by
+     * adding a route, and §69.99.1 ("do not add SID 1") is upgraded to: never add a
+     * second board route on this firmware. Keep exactly one route. */
+    static const unsigned kSecondSid = UINT16_MAX;
     NativeAdrenoGmuContextReport &q = native_gpu_context;
     const IOReturn ctx = NativeAdrenoGpuContextBringup(reinterpret_cast<volatile uint8_t *>(gSmmuMap->getVirtualAddress()),
-        kSmmuWindow, 0, 2, 0, 0, 1, 1, gpuCtxProgress, &q);
+        kSmmuWindow, 0, 2, 0, 0, 1, kSecondSid, gpuCtxProgress, &q);
     // Q s<step> st<IOReturn> k<program>/<attach kit status> p<phase>e<enabled> r<route phase>v<verified> n<spans>
     snprintf(row, sizeof row, "Q s%u st%x k%u/%u p%ue%u r%uv%u n%u", q.step, unsigned(ctx), q.program_status, q.route_status,
              q.program_phase, q.program_enabled, q.route_phase, q.routes_verified, q.spans);
@@ -1254,92 +2202,115 @@ void gpuStart() {
     if (ctx) return;
     gpuSetActlr();
     c[0] = 1;
-    if (NativeAdrenoGpuContextBuffers(gGpuBuffers)) {setRow(7, "C1 buffers refused"); return;}
-    for (unsigned i = 0; i < 5; ++i) {
+    if (NativeAdrenoGpuContextBuffers(gGpuBuffers)) {setRow(7, "C1 buffers refused"); IOLog("MUYU CPROW C1 buffers refused\n"); return;}
+    for (unsigned i = 0; i < GpuBufferCount; ++i) {
         IODeviceMemory *m = IODeviceMemory::withRange(gGpuBuffers[i].physical, gGpuBuffers[i].bytes);
         if (m) {
             gGpuMaps[i] = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapWriteCombineCache), OSNoRetain);
             m->release();
         }
-        if (!gGpuMaps[i]) {setRow(7, "C1 nomap buffer"); return;}
+        if (!gGpuMaps[i]) {setRow(7, "C1 nomap buffer"); IOLog("MUYU CPROW C1 nomap buffer\n"); return;}
         gGpuCpu[i] = reinterpret_cast<volatile uint8_t *>(gGpuMaps[i]->getVirtualAddress());
     }
     // 2. SQE: adreno_fw_create_bo copies the firmware without its first dword.
+    // 2026-11-11: gpuStart stopped here with cp=2 and the SQE stage never wrote the buffer. The cause is the
+    // same one §13 found for the GMU image: native_adreno_sqe_firmware_image_size only has the weak default
+    // from NativeAdrenoFirmwareDefaults.cpp, a zero length, and "size < 8" returns "C2 no sqe image" before a
+    // single register write. The board's real a740 SQE microcode is now generated into muyu_sqe_firmware
+    // (gen-muyu-gmu-source.py --sqe-firmware), so take that first and keep the driver symbol as the fallback.
     c[0] = 2;
-    const uint64_t sqe = &native_adreno_sqe_firmware_image_size ? native_adreno_sqe_firmware_image_size : 0;
-    if (sqe < 8 || sqe - 4 > gGpuBuffers[0].bytes) {setRow(7, "C2 no sqe image"); return;}
-    for (uint64_t i = 4; i < sqe; ++i) gGpuCpu[0][i - 4] = native_adreno_sqe_firmware_image[i];
+    const uint8_t *sqe = muyu_sqe_firmware_size ? reinterpret_cast<const uint8_t *>(muyu_sqe_firmware)
+                                                : (native_adreno_sqe_firmware_image_size ? native_adreno_sqe_firmware_image : nullptr);
+    const uint64_t sqe_bytes = muyu_sqe_firmware_size ? (uint64_t)muyu_sqe_firmware_size
+                             : (native_adreno_sqe_firmware_image_size ? native_adreno_sqe_firmware_image_size : 0);
+    if (!sqe || sqe_bytes < 8 || sqe_bytes - 4 > gGpuBuffers[0].bytes) {
+        snprintf(row, sizeof row, "C2 no sqe m%x n%llx b%x", muyu_sqe_firmware_size ? 1 : 0,
+                 (unsigned long long)sqe_bytes, (unsigned)gGpuBuffers[0].bytes);
+        setRow(7, row);
+        return;
+    }
+    for (uint64_t i = 4; i < sqe_bytes; ++i) gGpuCpu[0][i - 4] = sqe[i];
     __asm__ volatile("dsb sy" ::: "memory");
-    for (uint64_t i = 4; i < sqe; ++i) if (gGpuCpu[0][i - 4] != native_adreno_sqe_firmware_image[i]) {c[1] = uint32_t(i); break;}
-    if (c[1]) {snprintf(row, sizeof row, "C2 sqe readback differs at %x", c[1]); setRow(7, row); return;}
+    for (uint64_t i = 4; i < sqe_bytes; ++i) if (gGpuCpu[0][i - 4] != sqe[i]) {c[1] = uint32_t(i); break;}
+    if (c[1]) {snprintf(row, sizeof row, "C2 sqe readback differs at %x", c[1]); setRow(7, row); IOLog("MUYU CPROW %s\n", row); return;}
     // 3. hw_init (a6xx_gpu.c), A740 branches only. OOB GPU_SET is already held (mode 8).
     c[0] = 3;
-    gpuWr(A740_GBIF_HALT, 0); (void)gpuRd(A740_GBIF_HALT);
-    gpuWr(A740_RBBM_GBIF_HALT, 0); (void)gpuRd(A740_RBBM_GBIF_HALT);
-    gpuWr(A740_RBBM_SECVID_TSB_CNTL, 0);
-    gpuWr64(A740_RBBM_SECVID_TSB_TRUSTED_BASE, 0);
-    gpuWr(A740_RBBM_SECVID_TSB_TRUSTED_SIZE, 0);
-    // a6xx_set_hwcg(true): gmu_cgc_mode 0x00020202, cgc delay 0x10111, hyst 0x5555, then the table unless already on.
-    gmuWr(A740_GPU_GMU_AO_GMU_CGC_MODE_CNTL, 0x00020202);
-    gmuWr(A740_GPU_GMU_AO_GMU_CGC_DELAY_CNTL, 0x10111);
-    gmuWr(A740_GPU_GMU_AO_GMU_CGC_HYST_CNTL, 0x5555);
-    if (gpuRd(A740_RBBM_CLOCK_CNTL) != 0x8aa8aa82) {
-        for (unsigned i = 0; i < NATIVE_ADRENO_A740_HWCG_COUNT; ++i) gpuWr(NativeAdrenoA740Hwcg[i][0], NativeAdrenoA740Hwcg[i][1]);
-        gpuWr(A740_RBBM_CLOCK_CNTL, 0x8aa8aa82);
-    }
-    gpuWr(A740_RBBM_GBIF_CLIENT_QOS_CNTL, 0x2120212);
-    gpuWr(A740_UCHE_GBIF_GX_CONFIG, 0x10240e0);
-    gpuWr(A740_RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffff);
-    gpuWr64(A740_UCHE_TRAP_BASE, 0x1fffffffff000ull);
-    gpuWr64(A740_UCHE_WRITE_THRU_BASE, 0x1fffffffff000ull);
-    gpuWr64(A740_UCHE_GMEM_RANGE_MIN, 0x1000000);                    // a740 family: SZ_16M
-    gpuWr64(A740_UCHE_GMEM_RANGE_MAX, 0x1000000 + 3 * 0x100000 - 1);  // gmem 3 MiB
-    gpuWr(A740_UCHE_CACHE_WAYS, 1u << 23);
-    gpuWr(A740_CP_AHB_CNTL, 0x1);
-    gpuWr(A740_RBBM_PERFCTR_CNTL, 0x1);
-    gpuWr(A740_RBBM_INTERFACE_HANG_INT_CNTL, (1u << 30) | 0xcfffff);
-    gpuWr(A740_UCHE_CLIENT_PF, (1u << 7) | 0x1);
-    // a6xx_set_cp_protect: ACCESS_PROT_EN | ACCESS_FAULT_ON_VIOL_EN | LAST_SPAN_INF_RANGE, then a730_protect.
-    gpuWr(A740_CP_PROTECT_CNTL, (1u << 0) | (1u << 1) | (1u << 3));
-    for (unsigned i = 0; i < NATIVE_ADRENO_A740_PROTECT_COUNT; ++i)
-        gpuWr(A740_CP_PROTECT + NativeAdrenoA740Protect[i][0], NativeAdrenoA740Protect[i][1]);
-    gpuWr(A740_UCHE_CMDQ_CONFIG, (6u << 16) | (6u << 12) | (9u << 8) | (1u << 3) | (1u << 2) | 2u);
-    // hw_apriv: A7XX_BR_APRIVMASK (ICACHE|RBFETCH|RBPRIVLEVEL|RBRPWB|CDREAD|CDWRITE) and A7XX_APRIV_MASK.
-    gpuWr(A740_CP_APRIV_CNTL, 0x6f);
-    gpuWr(A740_CP_BV_APRIV_CNTL, 0x0f);
-    gpuWr(A740_CP_LPAC_APRIV_CNTL, 0x0f);
-    gpuWr(A740_RB_CMP_DBG_ECO_CNTL, gpuRd(A740_RB_CMP_DBG_ECO_CNTL) | (1u << 11));
-    // a6xx_set_ubwc_config, sm8550_data: UBWC 4.0 encoder, swizzle levels 2+3, highest bank bit 16 (hbb_lo 3, hbb_hi 0),
-    // AMSBC on (>= 3.0), rgb565 predicator on (>= 4.0), min_acc_len_64b off, ubwc_mode off, uavflagprd_inv 2,
-    // macrotile mode on.
-    gpuWr(A740_RB_NC_MODE_CNTL, (1u << 11) | (1u << 4) | (3u << 1));
-    gpuWr(A740_TPL1_NC_MODE_CNTL, 3u << 1);
-    gpuWr(A740_SP_NC_MODE_CNTL, (2u << 4) | (3u << 1));
-    for (uint32_t pipe = 1; pipe <= 2; ++pipe) {   // PIPE_BR, PIPE_BV
-        gpuWr(A740_CP_APERTURE_CNTL_HOST, pipe << 12);
-        gpuWr(A740_GRAS_NC_MODE_CNTL, 3u << 5);
-    }
-    gpuWr(A740_CP_APERTURE_CNTL_HOST, 0);           // PIPE_NONE
-    gpuWr(A740_UCHE_MODE_CNTL, 3u << 21);
-    gpuWr(A740_RBBM_NC_MODE_CNTL, 1);
-    // A7XX_INT_MASK: bits 1,6,7,8,9,15,17,20,22,23,24,25,28,29. Nothing services the GPU interrupt yet; status is polled.
-    gpuWr(A740_RBBM_INT_0_MASK, 0x33d283c2);
-    gpuWr64(A740_CP_SQE_INSTR_BASE, gGpuBuffers[0].iova);
+    gpuHwInit();
     // 4. Ring 0 (MSM_GPU_RB_CNTL_DEFAULT: 32 KiB, block 32; hw_apriv uses the hardware rptr shadow at memptrs+0).
     c[0] = 4;
-    const NativeAdrenoRingIo rio{nullptr, ringWrite, ringRead, ringBarrier};
+    // The framework RingIo grew fence_cookie / fence_status (GMU AHB fence checking). Both are
+    // optional; leave them null so WPTR writes stay unchecked, exactly as the older probe behaved.
+    const NativeAdrenoRingIo rio{nullptr, ringWrite, ringRead, ringBarrier, nullptr, nullptr};
     const NativeAdrenoRingCache cache{nullptr, ringPublish, ringAcquire};
     const IOReturn attached = gRing.attach(&rio, &cache, const_cast<uint8_t *>(gGpuCpu[1]), gGpuBuffers[1].bytes,
         gGpuBuffers[1].iova, const_cast<uint8_t *>(gGpuCpu[2]), gGpuBuffers[2].bytes, gGpuBuffers[2].iova);
-    if (attached) {snprintf(row, sizeof row, "C4 ring attach %x", unsigned(attached)); setRow(7, row); return;}
+    if (attached) {snprintf(row, sizeof row, "C4 ring attach %x", unsigned(attached)); setRow(7, row); IOLog("MUYU CPROW %s\n", row); return;}
+    /* fix62: attach() zeroes the whole memptrs BO through its write-combined CPU
+     * mapping, but the CP reads the BV rptr shadow (iova + 8, dword 2) from DRAM
+     * and ringPublish()/ringAcquire() only issue dsb sy. fix56 proved that WC
+     * pages need an explicit clean+invalidate before the device sees their zeros.
+     * BV has stayed in its idle loop at PC 0x132 across fix57..fix61; if that is a
+     * stale BV rptr, this is where it is fixed. Log both views, then push the first
+     * page to the point of coherency. */
+    {
+        const volatile uint32_t *memptrs = reinterpret_cast<const volatile uint32_t *>(gGpuCpu[2]);
+        const uint64_t pa = gGpuBuffers[2].physical;
+        uint32_t before = 0xdeadbeefu, after = 0xdeadbeefu;
+        (void)dramRead32(pa + 8, &before);
+        IODeviceMemory *cm = IODeviceMemory::withRange(pa & ~uint64_t(0xfff), 0x1000);
+        if (cm) {
+            IOMemoryMap *map = cm->map(kIOMapAnywhere);
+            cm->release();
+            if (map) {
+                const uintptr_t cv = uintptr_t(map->getVirtualAddress());
+                for (size_t at = 0; at < 0x1000; at += 64)
+                    __asm__ volatile("dc civac, %0" :: "r"((cv + at) & ~uintptr_t(63)) : "memory");
+                __asm__ volatile("dsb sy" ::: "memory");
+                map->release();
+            }
+        }
+        (void)dramRead32(pa + 8, &after);
+        IOLog("MUYU BVMEM cpu=%08x dram_before=%08x dram_after=%08x pa=%08x%08x iova=%08x%08x\n",
+              memptrs ? memptrs[2] : 0xdeadbeefu, before, after,
+              uint32_t(pa >> 32), uint32_t(pa),
+              uint32_t(gGpuBuffers[2].iova >> 32), uint32_t(gGpuBuffers[2].iova));
+    }
     gpuWr64(A740_CP_BV_RB_RPTR_ADDR, gGpuBuffers[2].iova + 8);   // rbmemptr(bv_rptr)
+    /* fix119: the CP's switch between two rings, ported from uke (which runs it, sheng-gpu-preempt=2, and sheng composites
+     * through the GPU). fix118 settled why this is the missing piece: BV's own read pointer (0x0a66) had run all the way to
+     * WPTR while CP_BV_IB1_BASE read 0 and the restore address was 0 - BV was executing without ever being given an IB,
+     * because nothing was preempting and therefore nothing ever restored one. Both of those fields come from a preemption
+     * record, and a record only exists when the board builds one. The command line is full, so the switch rides the same
+     * render-mode carrier as everything else: sheng-tum=...p. */
+    {
+        unsigned preempt = 0;
+        if (!PE_parse_boot_argn("sheng-gpu-preempt", &preempt, sizeof preempt)) {
+            char carrier[24] = {};
+            if (PE_parse_boot_argn("sheng-tum", carrier, sizeof carrier))
+                for (const char *c = carrier; *c; ++c) if (*c == 'p') preempt = 2;
+        }
+        gPreemptWanted = preempt == 1 || preempt == 2;
+        gPreemptMode = preempt == 2 ? 2 : 1;
+        IOLog("MUYU PREEMPT mode=%u\n", gPreemptWanted ? gPreemptMode : 0u);
+        if (gPreemptWanted) {
+            const IOReturn second = gRing1.attachSecondary(&rio, &cache, const_cast<uint8_t *>(gGpuCpu[9]), gGpuBuffers[9].bytes,
+                gGpuBuffers[9].iova, const_cast<uint8_t *>(gGpuCpu[10]), gGpuBuffers[10].bytes, gGpuBuffers[10].iova);
+            if (second) {snprintf(row, sizeof row, "C4 ring1 attach %x", unsigned(second)); setRow(7, row); IOLog("MUYU CPROW %s\n", row); return;}
+            const IOReturn p0 = gRing.setPreempt(gGpuBuffers[5].iova, gGpuBuffers[7].iova, gGpuBuffers[2].iova + 8);
+            const IOReturn p1 = gRing1.setPreempt(gGpuBuffers[6].iova, gGpuBuffers[8].iova, gGpuBuffers[10].iova + 8);
+            if (p0 || p1) {snprintf(row, sizeof row, "C4 preempt %x/%x", unsigned(p0), unsigned(p1)); setRow(7, row); IOLog("MUYU CPROW %s\n", row); return;}
+            IOLog("MUYU PREEMPT rings ready rec=%08x/%08x smmu=%08x/%08x\n",
+                  uint32_t(gGpuBuffers[5].iova), uint32_t(gGpuBuffers[6].iova),
+                  uint32_t(gGpuBuffers[7].iova), uint32_t(gGpuBuffers[8].iova));
+        }
+    }
     gpuWr(A740_CP_SQE_CNTL, 1);
     // 5. a7xx_patch_pwrup_reglist (preemption list only; IFPC is off) and a7xx_cp_init through the ring.
     c[0] = 5;
     size_t written = 0;
     const IOReturn list = NativeAdrenoPwrupList::buildA740(ringRead, nullptr, const_cast<uint8_t *>(gGpuCpu[3]),
         gGpuBuffers[3].bytes, &written);
-    if (list) {snprintf(row, sizeof row, "C5 pwrup list %x", unsigned(list)); setRow(7, row); return;}
+    if (list) {snprintf(row, sizeof row, "C5 pwrup list %x", unsigned(list)); setRow(7, row); IOLog("MUYU CPROW %s\n", row); return;}
     __asm__ volatile("dsb sy" ::: "memory");
     const NativeAdrenoCpInitConfig config{gGpuBuffers[0].iova, gGpuBuffers[3].iova, 1};   // base written above, before SQE_CNTL
     uint32_t fence = 0;
@@ -1368,6 +2339,7 @@ void gpuStart() {
     // sheng-gpu-zap=0 skips the zap/secure-mode step (int-019 bisect: int-017 stalled userspace at the logo, int-018 with
     // the probe off reached the desktop). The CP then stays in secure mode, as in int-016.
     if (c[0] == 10) {
+        native_gpu_cp_live = true;   // fix194: the CP executed an IB and wrote the scratch word, so GPU-window reads are safe again
         setRow(6, "S zap");
         if (zapLimit()) zapAndSecure();
         else setRow(2, "Z off");
@@ -1377,6 +2349,9 @@ void gpuStart() {
         const bool selftest = bootArg("sheng-gpu-selftest", 0) != 0;
         if (selftest) userClientTest();
         setRow(5, "P start");
+        /* §38: without this hook NativeAdrenoPublish's hangcheck only counts hangs (H h32 r0 r0) and the
+         * ring never recovers. uke registers gpuRestart here; the 17-line port had omitted it. */
+        if (native_adreno_set_restart) native_adreno_set_restart(gpuRestart, nullptr);
         publishAndWrapperTest(selftest);
         if (bootArg("sheng-gpu-metal", 0) == 1) publishMetal();
     }
@@ -1390,6 +2365,10 @@ void startHeartbeatThread() {
     thread_t thread = nullptr;
     if (kernel_thread_start(heartbeatThread, nullptr, &thread) == KERN_SUCCESS) {thread_deallocate(thread); gHeartbeatThread = true;}
 }
+/* The CP-stall rows are collected in heartbeat() but rows 2/3 of boot_progress_ext are overwritten by later
+ * boot stages, and the Q row is overwritten by the coherence row inside the very same branch. The three lines
+ * go to the extern "C" muyu_cp_stall_rows above (S = RBBM_STATUS1..3 / CP interrupt / protect / FSR,
+ * Q = each CP thread's SQE PC and the header of the packet it sits on, C = the IB coherence sample). */
 void heartbeat() {
     // Row 4 from now on: seconds since the run ended, GX state, and (only with GX on) the GPU status words, so a photo
     // tells a live kernel from a hung one and shows whether the GPU stays idle.
@@ -1397,7 +2376,8 @@ void heartbeat() {
     for (unsigned t = 0;; t += 2) {
         uint32_t info = 0;
         gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kG2hInfo, &info);
-        if (gxOn() && gpuRd(A740_CP_RB_RPTR) != gpuRd(A740_CP_RB_WPTR)) {
+        if (gpuPollable() && gpuRd(A740_CP_RB_RPTR) != gpuRd(A740_CP_RB_WPTR)) {
+            native_gpu_stall_seq = t;   /* §43: Q5/Q6 are only refreshed here; Q8 reports this tick to expose their age. */
             // The ring is not drained: where each CP thread is (a6xx.xml A7XX: BV RB_RPTR 0xa66, IB1/IB2 base and remaining dwords
             // 0x928/0x92a and 0x92b/0x92d, BV IB1 0xa6d/0xa70), so a photograph tells which IB and how far into it the CP stopped.
             // Rows are 47 characters, so IB bases show their low 24 bits.
@@ -1410,6 +2390,7 @@ void heartbeat() {
             char stall[64];
             snprintf(stall, sizeof stall, "S%x/%x/%x I%x P%x/%x f%x a%x/%x c%x", gpuRd(0x0211), gpuRd(0x0212),
                      gpuRd(0x0213), gpuRd(0x0823), gpuRd(0x0824), gpuRd(0x0a61), gpuFsr(), gActlr, gActlrSet, gSacr);
+            strlcpy(muyu_cp_stall_rows[0], stall, sizeof muyu_cp_stall_rows[0]);
             setRow(3, stall);
             // Row 2: each thread's SQE PC and the header of the packet it is on. a6xx_cp_hw_err_irq() reads CP_SQE_STAT_DATA after
             // selecting index 1 for the current opcode; index 0 is the PC and successive reads advance (crashdec).
@@ -1417,6 +2398,7 @@ void heartbeat() {
             gpuWr(0x0908, 0); sqe[0] = gpuRd(0x0909); sqe[1] = gpuRd(0x0909);
             gpuWr(0x0a87, 0); sqe[2] = gpuRd(0x0a88); sqe[3] = gpuRd(0x0a88);
             snprintf(stall, sizeof stall, "Q br %x %08x bv %x %08x", sqe[0], sqe[1], sqe[2], sqe[3]);
+            strlcpy(muyu_cp_stall_rows[1], stall, sizeof muyu_cp_stall_rows[1]);
             setRow(2, stall);
             // Once per hang, row 2 then shows instead the last submission's coherence sample (int-070), "C<submissions> c<first IB
             // word, kernel cacheable alias> u<DRAM before the CPU cache maintenance> v<DRAM after it> d<DRAM now>". int-069 found the
@@ -1430,8 +2412,39 @@ void heartbeat() {
                 snprintf(coherenceRow, sizeof coherenceRow, "C%u c%x u%x v%x d%x", native_adreno_coherence[0],
                          native_adreno_coherence[1], native_adreno_coherence[2], native_adreno_coherence[3], uint32_t(w));
             }
+            strlcpy(muyu_cp_stall_rows[2], coherenceRow, sizeof muyu_cp_stall_rows[2]);
             setRow(2, coherenceRow);
-        } else if (gxOn()) {
+            /* The CP's own ring registers: a zero packet header with valid DRAM words means the CP may be
+             * fetching from a ring whose base/control it lost. Expected here: b200000/0 c20c r300000/0. */
+            snprintf(muyu_cp_stall_rows[3], sizeof muyu_cp_stall_rows[3],
+                     "P b%x/%x c%x r%x/%x s%x f%x t%x", gpuRd(0x0800), gpuRd(0x0801), gpuRd(0x0802),
+                     gpuRd(0x0804), gpuRd(0x0805), gpuRd(0x0808), gpuRd(0x0821), gpuRd(0x0825));
+            /* WPTR fence retries (writes / dropped once / repeated / dropped after 200 tries) and the stall
+             * handler's stages: kick, bus drain, reassert, plus the client/arbiter halt acknowledges. */
+            snprintf(muyu_cp_stall_rows[4], sizeof muyu_cp_stall_rows[4],
+                     "W%u/%u/%u/%u u%u/%u/%u a%x/%x", (unsigned)native_adreno_wptr_fence[0],
+                     (unsigned)native_adreno_wptr_fence[1], (unsigned)native_adreno_wptr_fence[2],
+                     (unsigned)native_adreno_wptr_fence[3], (unsigned)native_adreno_unstick[0],
+                     (unsigned)native_adreno_unstick[4], (unsigned)native_adreno_unstick[14],
+                     (unsigned)native_adreno_unstick[5], (unsigned)native_adreno_unstick[6]);
+            /* §38: Q3 proved the ring registers correct, so the remaining question is whether the CP/SQE is
+             * halted, power-collapsed (IFPC), or parked in a different hardware context. i = CP_CP2GMU_STATUS
+             * (0x812, bit0 IFPC), a = CP_APERTURE_CNTL_HOST (0xa00, host's context select), q = the live
+             * CP_SQE_INSTR_BASE, m = CP_MISC_CNTL, r/s/t = the raw RPTR/WPTR, RBBM_STATUS and CP_STATUS_1. */
+            snprintf(muyu_cp_stall_rows[5], sizeof muyu_cp_stall_rows[5],
+                     "G i%x a%x q%x/%x m%x r%x/%x s%x t%x b%x", gpuRd(0x0812), gpuRd(0x0a00),
+                     gpuRd(0x0830), gpuRd(0x0831), gpuRd(0x0840), gpuRd(0x0806), gpuRd(0x0807),
+                     gpuRd(0x0210), gpuRd(0x0825), gpuRd(0x0201));
+            /* Four words of CP_SQE_STAT per thread, selected from index 0 as a6xx_cp_hw_err_irq does. The
+             * first is the microcode PC; the rest show whether the SQE sits in an idle/WFI loop. */
+            uint32_t sbr[4] = {}, sbv[4] = {};
+            gpuWr(0x0908, 0);
+            for (unsigned k = 0; k < 4; ++k) sbr[k] = gpuRd(0x0909);
+            gpuWr(0x0a87, 0);
+            for (unsigned k = 0; k < 4; ++k) sbv[k] = gpuRd(0x0a88);
+            snprintf(muyu_cp_stall_rows[6], sizeof muyu_cp_stall_rows[6],
+                     "S br %x/%x/%x bv %x/%x/%x", sbr[1], sbr[2], sbr[3], sbv[1], sbv[2], sbv[3]);
+        } else if (gpuPollable()) {
             // Without a stall, row 2 shows the coherence samples, so a passing run still shows whether a CPU cache held an IB.
             if (native_adreno_coherence[0]) {
                 char sample[64];
@@ -1449,16 +2462,63 @@ void heartbeat() {
                      gpuRd(A740_RBBM_INT_0_STATUS), gpuRd(A740_CP_HW_FAULT), gpuRd(A740_CP_RB_RPTR), gpuRd(A740_CP_RB_WPTR),
                      mem ? mem[1] : 0, info, gpuFsr(), gfsr, gIrqCount,
                      (unsigned long long)(&armcpu_spi_unhandled ? armcpu_spi_unhandled : 0));
+        } else if (gxOn()) {
+            snprintf(row, sizeof row, "H%u gx-on cp-off g%x", t, info);   // fix194: GX powered, CP never initialised, no GPU reads
         } else {
             snprintf(row, sizeof row, "H%u gx-off g%x", t, info);
+        }
+        /* §46 / restart3: Q7 is now STRICTLY READ-ONLY. restart2 wrote 0x0908 (SQE_STAT index select) and
+         * read 0x0909 inside the stalled branch; §45 showed that boot never reproduced the restart1 baseline
+         * (RT n0 / H h0 r0 / Z5 f0/0/0/0) while -3 stayed, so that write is the prime suspect for perturbing
+         * CP initialisation. Q7 now issues only three 1 ms-spaced CP_RB_RPTR reads and records the ring state:
+         * s=0 (drained) means three equal r values are a healthy idle CP, NOT a frozen one (§45.3). Q8 adds
+         * t<restart hook count> so a zeroed RT2 can never be mistaken for a real sample. */
+        if (gpuPollable()) {
+            const uint32_t wptr = gpuRd(A740_CP_RB_WPTR);
+            const bool stalled = gpuRd(A740_CP_RB_RPTR) != wptr;
+            uint32_t rptr[3] = {};
+            for (unsigned k = 0; k < 3; ++k) {
+                rptr[k] = gpuRd(A740_CP_RB_RPTR);
+                if (k != 2) IODelay(1000);
+            }
+            snprintf(muyu_cp_stall_rows[7], sizeof muyu_cp_stall_rows[7],
+                     "K#%u s%u w%x r%x/%x/%x", t, stalled ? 1 : 0, wptr, rptr[0], rptr[1], rptr[2]);
+            const uint32_t gfsr = gSmmuMap ? *reinterpret_cast<volatile uint32_t *>(gSmmuMap->getVirtualAddress() + 0x48) : 0xdeadbeef;
+            snprintf(muyu_cp_stall_rows[8], sizeof muyu_cp_stall_rows[8],
+                     "M#%u g%x f%x n%u s%x q%x t%u", t, gfsr, gpuFsr(),
+                     (unsigned)native_adreno_global_fault[0], (unsigned)native_adreno_global_fault[1],
+                     native_gpu_stall_seq, (unsigned)native_gpu_restart[0]);
         }
         setRow(4, row);
         metalRows();
         registerExecObserver();
-        if (!(gxOn() && gpuRd(A740_CP_RB_RPTR) != gpuRd(A740_CP_RB_WPTR))) gicRow();
+        if (!(gpuPollable() && gpuRd(A740_CP_RB_RPTR) != gpuRd(A740_CP_RB_WPTR))) gicRow();
         if (t == 4 || t == 40 || t == 120) ipiSelfTest();
         IOSleep(2000);
     }
+}
+
+// fix199: restart one user-space process by name so a stalled input consumer can be rebuilt from the kernel side.
+// The lookup reuses the pair this file already carries (proc_iterate over PROC_ALLPROCLIST + proc_name_address, as
+// scanProcess does) instead of pulling in proc_internal.h, whose proc_iterate/proc_selfname prototypes differ from the
+// hand-written ones above (-Werror made that a hard error). The pointer is captured inside the callout, where the list
+// lock keeps it valid, and the signal is sent right after proc_iterate returns: backboardd is a long-lived process, so
+// the window between the two is a few microseconds. psignal's parameter is the proc_t the callout hands back, declared
+// here as void * only because this translation unit has no proc_t typedef. 9 is SIGKILL.
+extern "C" void psignal(void *p, int signum);
+static void *gRestartHit;
+static int restartCallout(void *proc, void *arg) {
+    const char *name = proc_name_address(proc);
+    if (name && strcmp(name, reinterpret_cast<const char *>(arg)) == 0) {gRestartHit = proc; return 1;}
+    return 0;
+}
+static int muyu_restart_proc(const char *want) {
+    if (!want || !want[0]) return -1;
+    gRestartHit = nullptr;
+    proc_iterate(1 /* PROC_ALLPROCLIST */, restartCallout, const_cast<char *>(want), nullptr, nullptr);
+    if (!gRestartHit) return -1;
+    psignal(gRestartHit, 9 /* SIGKILL */);
+    return 1;
 }
 
 void gpuOn() {
@@ -1466,12 +2526,21 @@ void gpuOn() {
     ShengGmuIo &io = gColdDevice.io;
     uint32_t *g = native_gpu_gx;
     auto rd = [&](unsigned w, uint32_t at) {uint32_t v = 0xdeadbeef; io.read32(io.cookie, w, at, &v); return v;};
+    // fix189: one line per sub-step, printed before the next step runs, plus the stop gate.
+    auto markPark = [&](unsigned s, uint32_t a, uint32_t b) {
+        IOLog("MUYU GX s%u st%x a%x b%x x%x>%x g%x\n", s, native_gpu_power_stage, a, b, g[3], g[4], g[0]);
+        if (native_gpu_gxstep <= static_cast<int>(s)) {
+            native_gpu_power_stage = 0x8d;
+            for (;;) IOSleep(60000);
+        }
+    };
     native_gpu_power_stage = 0x81;
     // a6xx_gmu_resume, after a successful a6xx_hfi_start: clear GMU2HOST and unmask only CM3_FAULT (A6XX_HFI_IRQ_MASK).
     io.write32(io.cookie, ShengGmuCore, kG2hClr, ~0u);
     io.write32(io.cookie, ShengGmuCore, kG2hMask, ~(1u << 23));
     io.barrier(io.cookie);
     g[3] = rd(ShengGmuCore, kGxStatus);
+    markPark(1, 0, 0);
     // a6xx_gmu_set_initial_freq -> a6xx_hfi_set_freq: {ack_type 1 (blocking), freq index, bw index}.
     const uint32_t vote[3] = {1, 1, 1};
     uint32_t out[16], error = 0;
@@ -1479,24 +2548,68 @@ void gpuOn() {
     g[0] = AdrenoHfiExchange(&gColdDevice.hfi, 30, vote, 3, 1000, hfiWait, out, 16, &count, &error);
     g[1] = error;
     native_gpu_power_stage = 0x82;
+    markPark(2, g[0], g[1]);
+    // fix190 (2026-11-16): step3 and step4 both leave the kernel able to tick for 400 s while no userspace ever comes
+    // up and the touch stream stays at zero frames, i.e. everything that lives on the CX rail slows to a crawl the
+    // moment the GMU accepts GMU_OOB_GPU_SET. Read the CX GDSCR and time a fixed batch of MMIO reads right before the
+    // request and right after the ack: if the post batch takes far longer than the pre batch in the SAME run, the
+    // interconnect/rail corner moved and no amount of further bisection inside gpuOn() will explain it.
+    auto bench = [&](const char *tag) {
+        const uint64_t t0 = mach_absolute_time();
+        uint32_t acc = 0;
+        for (unsigned i = 0; i < 4000; ++i) acc += rd(ShengGmuCore, kG2hInfo);
+        const uint64_t t1 = mach_absolute_time();
+        uint64_t ns0 = 0, ns1 = 0;
+        absolutetime_to_nanoseconds(t0, &ns0);
+        absolutetime_to_nanoseconds(t1, &ns1);
+        uint32_t cx = 0;
+        if (gVa[GPB_WIN_GPUCC]) cx = *reinterpret_cast<volatile uint32_t *>(gVa[GPB_WIN_GPUCC] + GPB_CC_CX_GDSCR);
+        IOLog("MUYU GX bench %s us%llu cx%08x acc%x\n", tag, (ns1 - ns0) / 1000, cx, acc);
+    };
     if (!g[0]) {
-        // hw_init: a6xx_gmu_set_oob(GMU_OOB_GPU_SET), non-legacy bits: request 30, ack 31, 10 ms at 100 us.
+        if (native_gpu_gxdelay > 0) {          // fix197: hold GX back until the boot storm is over.
+            IOLog("MUYU GX hold %d s (waiting for the boot storm to end)\n", native_gpu_gxdelay);
+            for (int i = 0; i < native_gpu_gxdelay; ++i) IOSleep(1000);
+            IOLog("MUYU GX go now\n");
+        }
+        // hw_init: a6xx_gmu_set_oob(GMU_OOB_GPU_SET), non-legacy bits: request 30, ack 31.
+        // The vendor budget is 1 s: a6xx_gmu.c:442 gmu_poll_timeout(GMU2HOST_INTR_INFO, ack, 100 us, 10000).
+        // This port waited only 100 x 100 us = 10 ms, so a slow GX/ARC ramp ended the wait with no ack,
+        // gx became false, gpuStart() was skipped and the boot showed o=1 with calls=0. The same image has
+        // produced calls=1 (o=4, 11-11 20:45) and calls=0, i.e. this is a timing cliff, not a code path.
+        bench("pre");
         io.write32(io.cookie, ShengGmuCore, kH2gSet, 1u << 30);
         io.barrier(io.cookie);
-        for (g[2] = 1; g[2] <= 100; ++g[2]) {
+        for (g[2] = 1; g[2] <= 10000; ++g[2]) {
             if (rd(ShengGmuCore, kG2hInfo) & (1u << 31)) break;
             IODelay(100);
         }
         io.write32(io.cookie, ShengGmuCore, kG2hClr, 1u << 31);
         io.barrier(io.cookie);
+        bench("post");
+        if (native_gpu_gxcycle) {   // fix193: give GX back before the rest of the boot runs, and read what it says.
+            io.write32(io.cookie, ShengGmuCore, kH2gClr, 1u << 30);
+            io.barrier(io.cookie);
+            uint32_t off = 0;
+            for (off = 1; off <= 10000; ++off) {
+                if (!(rd(ShengGmuCore, kG2hInfo) & (1u << 31))) break;
+                IODelay(100);
+            }
+            IOLog("MUYU GX cycle off polls=%u st=%x gdscr=%08x\n", off, rd(ShengGmuCore, kGxStatus),
+                gVa[GPB_WIN_GPUCC] ? *reinterpret_cast<volatile uint32_t *>(gVa[GPB_WIN_GPUCC] + GPB_CC_GX_GDSCR) : 0);
+        }
     }
+    markPark(3, g[2], 0);
     g[4] = rd(ShengGmuCore, kGxStatus);
     uint32_t gdscr = 0;
     if (gVa[GPB_WIN_GPUCC]) gdscr = *reinterpret_cast<volatile uint32_t *>(gVa[GPB_WIN_GPUCC] + GPB_CC_GX_GDSCR);
     g[5] = gdscr;
     native_gpu_power_stage = 0x83;
+    markPark(4, g[4], gdscr);
     // GX on per a7xx_gmu_gx_is_on: GX_HM_GDSC_POWER_OFF (bit 0) and GX_HM_CLK_OFF (bit 1) both clear.
-    const bool gx = g[2] <= 100 && !(g[4] & 3);
+    // o>10000 means the ack never came inside the vendor-length 1 s budget (the old code printed 101
+    // for the same condition out of a 10 ms budget).
+    const bool gx = g[2] <= 10000 && !(g[4] & 3);
     if (gx) {
         g[6] = rd(ShengGmuGpu, kRbbmStatus);
         g[7] = rd(ShengGmuGpu, kGbifHalt);
@@ -1505,28 +2618,67 @@ void gpuOn() {
     if (gx) snprintf(row, sizeof row, "X v%u/%x o%u x%x>%x c%08x R%08x H%x", g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
     else snprintf(row, sizeof row, "X v%u/%x o%u x%x>%x c%08x gx-off", g[0], g[1], g[2], g[3], g[4], g[5]);
     setRow(5, row);
+    IOLog("MUYU COLD %s\n", row);   // fix189: row 5 is set after logRows("COLD") already ran, so print it here
     native_gpu_power_stage = gx ? 0x87 : 0x8f;
     if (gx && mode() >= 9) gpuStart();
+    // fix199: with GX on, rebuild the user-space input consumer once and report what the kernel sees. backboardd owns
+    // HID event delivery and the scene updates, so a restart is the cheapest way to tell "stalled instance" apart from
+    // "the whole I/O complex is wedged". Nothing about the GPU sequence changes here; the restart is a pure add-on.
+    if (gx && native_gpu_respring > 0) {
+        IOSleep(static_cast<unsigned>(native_gpu_respring) * 1000u);
+        /* fix201: a single attempt ten seconds after GX-on always answered -1, because backboardd does
+         * not exist yet that early on this port (the first line naming /usr/libexec/backboardd[57] is at
+         * 123.9 s, GX came up at 51.6 s). Poll until the name resolves, then kill it once, so the
+         * restarted instance is the one that inherits an already-powered GPU. */
+        int bb = -1;
+        for (unsigned tries = 0; tries < 90u; ++tries) {
+            bb = muyu_restart_proc("backboardd");
+            if (bb == 1) break;
+            IOSleep(1000);
+        }
+        IOLog("MUYU RESP backboardd r=%d after %d s polled\n", bb, native_gpu_respring);
+        if (native_gpu_respring_sb > 0) {
+            IOSleep(static_cast<unsigned>(native_gpu_respring_sb) * 1000u);
+            const int sb = muyu_restart_proc("SpringBoard");
+            IOLog("MUYU RESP SpringBoard r=%d after %d s\n", sb, native_gpu_respring_sb);
+        }
+    }
     if (gHeartbeatThread) for (;;) IOSleep(60000);
     heartbeat();
 }
 void gmuColdStart(const gpb_result &r) {
     char row[64];
     native_gpu_power_stage = 0x71;
-    if (!ShengGmuColdStart || !ShengGmuBindMmio || !NativeAdrenoGmuContextPayloads || !native_adreno_firmware_image ||
-        !&native_adreno_firmware_image_size || native_adreno_firmware_image_size < 4) {
+    if (!ShengGmuColdStart || !ShengGmuBindMmio || !NativeAdrenoGmuContextPayloads) {
         setRow(7, "S nolink");
         return;
     }
+    /* Two possible suppliers of the GMU image, in the order that can actually succeed on this board: the muyu blob
+     * compiled next to this file, then the native_adreno_* pair that only the sheng/uke archive defines. */
+    const uint8_t *fw = muyu_gmu_firmware_size ? reinterpret_cast<const uint8_t *>(muyu_gmu_firmware)
+                                                : native_adreno_firmware_image;
+    const size_t fw_bytes = muyu_gmu_firmware_size ? static_cast<size_t>(muyu_gmu_firmware_size)
+                                                   : static_cast<size_t>(native_adreno_firmware_image_size);
+    if (!fw || fw_bytes < 4) {
+        snprintf(row, sizeof row, "S nofw m%x n%x", muyu_gmu_firmware_size ? 1 : 0,
+                 native_adreno_firmware_image_size ? 1 : 0);
+        setRow(7, row);
+        return;
+    }
     for (unsigned w = 0; w < 5; ++w) {
-        IODeviceMemory *memory = IODeviceMemory::withRange(kColdPhys[w], kColdLen[w]);
+        const uint64_t phys = ShengGmuWindowPhysical(w), len = ShengGmuWindowBytes(w);
+        IODeviceMemory *memory = phys && len ? IODeviceMemory::withRange(phys, len) : nullptr;
         if (memory) {
             gColdMaps[w] = OSSharedPtr<IOMemoryMap>(memory->map(kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain);
             memory->release();
         }
-        if (!gColdMaps[w]) {setRow(7, "S nomap window"); return;}
-        gColdMmio.windows[w] = {reinterpret_cast<volatile unsigned char *>(gColdMaps[w]->getVirtualAddress()), kColdPhys[w],
-                                kColdLen[w]};
+        if (!gColdMaps[w]) {
+            snprintf(row, sizeof row, "S nomap w%u p%llx l%llx", w, static_cast<unsigned long long>(phys),
+                     static_cast<unsigned long long>(len));
+            setRow(7, row);
+            return;
+        }
+        gColdMmio.windows[w] = {reinterpret_cast<volatile unsigned char *>(gColdMaps[w]->getVirtualAddress()), phys, len};
     }
     NativeAdrenoGmuPayload payloads[5];
     const IOReturn got = NativeAdrenoGmuContextPayloads(payloads);
@@ -1546,19 +2698,47 @@ void gmuColdStart(const gpb_result &r) {
     d = {};
     if (ShengGmuBindMmio(&gColdMmio, &d.io)) {setRow(7, "S bind refused"); return;}
     d.services = {nullptr, coldSha256, coldNow, coldWait};
-    gColdConfig.chip_id = 0x43050a01;
-    gColdConfig.firmware = native_adreno_firmware_image;
-    gColdConfig.firmware_bytes = static_cast<size_t>(native_adreno_firmware_image_size);
-    gColdConfig.poll_budget = 200;   // ShengGmu also stops each poll at 10 ms, as gmu_poll_timeout(.., 100, 10000)
-    // a6xx_gmu_resume, before a6xx_gmu_fw_start: clear every AO interrupt and unmask only the fatal ones.
-    d.io.write32(d.io.cookie, ShengGmuCore, kAoIrqClr, ~0u);
-    d.io.write32(d.io.cookie, ShengGmuCore, kAoIrqMask, ~kAoFatal);
-    d.io.barrier(d.io.cookie);
+    gColdConfig.chip_id = ShengGmuChipId();   // asked from ShengGmuSource.h, never typed here
+    gColdConfig.firmware = fw;
+    gColdConfig.firmware_bytes = fw_bytes;
+    // 1000 x 100 us covers the vendor's 100 ms FW_INIT budget (gmu_poll_timeout(.., 100, 100000)); the old 200
+    // could not, and poll() capped every wait at 10 ms anyway, so an alive CM3 would still have looked dead.
+    gColdConfig.poll_budget = 1000;
+    // a6xx_gmu_resume, before a6xx_gmu_fw_start: clear every AO interrupt and unmask only the fatal ones. The AO
+    // block sits at 0x3d8ec10, i.e. 0x23b04 dwords past the 0x3d00000 GPU base; the offset handed to write32() must
+    // therefore be measured from the window base the DT actually gives, which used to be a literal 0x6a000 fudge.
+    const uint64_t core_base = ShengGmuWindowPhysical(ShengGmuCore);
+    const uint64_t ao_clr_abs = 0x03d00000ull + 0x23b04ull * 4, ao_mask_abs = 0x03d00000ull + 0x23b06ull * 4;
+    if (core_base && ao_mask_abs + 4 <= core_base + ShengGmuWindowBytes(ShengGmuCore)) {
+        d.io.write32(d.io.cookie, ShengGmuCore, static_cast<uint32_t>(ao_clr_abs - core_base), ~0u);
+        d.io.write32(d.io.cookie, ShengGmuCore, static_cast<uint32_t>(ao_mask_abs - core_base), ~kAoFatal);
+        d.io.barrier(d.io.cookie);
+    } else {
+        setRow(7, "S ao outside window");   // nothing written; the cold start below will report what it misses
+    }
     uint32_t before[4], after[4];
     readGmuState(before);
     const ShengGmuStartupLimits limits = {1000, 100, 50000, 2000000};
     setRow(7, "S running");
     native_gpu_power_stage = 0x72;
+    // Bring-up bisect (GPU-HANDOFF.md §69.160): sheng-gpu-coldstop=<n> aborts the cold start the
+    // moment phase <n> has completed and leaves its writes in place, so one boot answers which
+    // phase of power=7 breaks the UI. 0 (absent) keeps the full cold start untouched.
+    unsigned coldstop = 0;
+    if (PE_parse_boot_argn("sheng-gpu-coldstop", &coldstop, sizeof coldstop)) sheng_gmu_coldstop_level = (int)coldstop;
+    /* fix210 (2026-11-16 20:1x): hold the whole cold start back until the UI is on its feet. See native_gpu_colddelay.
+     * The rows on screen keep saying "S running" for the whole hold, and every 30 s this prints the vnode table as a
+     * free side channel for fix211 (vn should sit near the ceiling while userland is still spawning). */
+    if (native_gpu_colddelay > 0) {
+        IOLog("MUYU COLD hold %d s (waiting for the UI)\n", native_gpu_colddelay);
+        for (int i = 0; i < native_gpu_colddelay; ++i) {
+            IOSleep(1000);
+            if (((i + 1) % 30) == 0) {
+                IOLog("MUYU COLD held %d/%d s vn=%ld dv=%d\n", i + 1, native_gpu_colddelay, muyu_probe_numvnodes, muyu_probe_desiredvnodes);
+            }
+        }
+        IOLog("MUYU COLD go now\n");
+    }
     const ShengGmuStatus status = ShengGmuColdStart(&d, &gColdConfig, &gStartup, &limits, &gColdResult);
     native_gpu_power_stage = status ? 0x7f : 0x77;
     readGmuState(after);
@@ -1578,11 +2758,13 @@ void gmuColdStart(const gpb_result &r) {
     setRow(6, row);
     // GPU4: S<ShengGmuStatus> ph<load phase> h<hash ok> f<FW_INIT_RESULT> H<HFI status> r<FW ready>/<HFI ready>
     //   a<AO fault status> c<GMU2HOST info> v<reset verified>
-    snprintf(row, sizeof row, "S%u ph%u h%u f%x H%x r%u%u a%x c%x v%u", status, l.phase, l.complete_hash_verified,
-             l.firmware_init_result, l.hfi_status, l.firmware_ready_observed, l.hfi_ready_observed, l.ao_fault_status,
-             l.cm3_fault_status, l.reset_verified);
+    // d<DTCM+0xff8 probe> picks the ready word (0xbabeface when <= 0x20010004, else 0x100), q<polls> is what the
+    // FW_INIT wait actually spent - that wait used to stop at a hard 10 ms, a tenth of the vendor's budget.
+    snprintf(row, sizeof row, "S%u ph%u h%u f%x H%x r%u%u a%x c%x v%u d%x q%u", status, l.phase,
+             l.complete_hash_verified, l.firmware_init_result, l.hfi_status, l.firmware_ready_observed,
+             l.hfi_ready_observed, l.ao_fault_status, l.cm3_fault_status, l.reset_verified, l.dtcm_probe, l.poll_reads);
     setRow(7, row);
-    if (mode() >= 8 && status == ShengGmuSuccess) gpuOn();
+    native_gpu_cold_status = static_cast<int>(status);   // fix187: gpuOn() now runs after logRows("COLD")
     (void)r;
 }
 void gmuPrerequisites(const gpb_result &r) {
@@ -1632,9 +2814,25 @@ void gmuPrerequisites(const gpb_result &r) {
         memcpy(&magic, gCmdDb + 4, 4);
         if (ShengGmuCommandDbInputs && ShengGmuBuildStartup) {
             gVoteInputs = {};
-            gVoteInputs.chip_id = 0x43050a01;   // a6xx_catalog.c A740 chip_ids, the ID ShengGmuVotes is pinned to
+            // The id the generated policy was built for, asked from the policy itself. A literal here is how the
+            // A740 id (0x43050a01) came to be passed to a header pinned on this board's Adreno735 id (0x43030b00).
+            gVoteInputs.chip_id = ShengGmuVotesChipId();
             parse = ShengGmuCommandDbInputs(gCmdDb, kCmdDbBytes, version, &gVoteInputs);
-            if (parse == ShengGmuDbSuccess) build = ShengGmuBuildStartup(&gVoteInputs, &gStartup);
+            if (parse == ShengGmuDbSuccess) {
+                ShengGmuBuildDiag dg = {};
+                // Same archive as ShengGmuBuildStartup below, so this is a direct call, not a weak probe.
+                build = ShengGmuBuildStartupDiag(&gVoteInputs, &gStartup, &dg);
+                char t[48];
+                snprintf(t, sizeof t, "V chip %08x gmxc%u %u/%u/%u/%u", dg.chip_id, dg.gmxc_present, dg.gfx_bytes,
+                         dg.cx_bytes, dg.mx_bytes, dg.gmxc_bytes);
+                setDiag(1, t);
+                snprintf(t, sizeof t, "R gf%u/%u m%u cx%u/%u m%u", dg.gpu_match, dg.gpu_total, dg.gpu_first_missing,
+                         dg.gmu_match, dg.gmu_total, dg.gmu_first_missing);
+                setDiag(2, t);
+                snprintf(t, sizeof t, "B st%u why%x d%u p%u s%u c%08x", build, dg.why, dg.detail, parse, build,
+                         gVoteInputs.cn0_address);
+                setDiag(3, t);
+            }
         } else parse = 8;
     }
     // GMU state words, only with the GMU clock and the GPUCC AHB clock already running (nothing here enables them).
@@ -1687,6 +2885,10 @@ void gmuPrerequisites(const gpb_result &r) {
             snprintf(row, sizeof row, "S skip c%u/%u p%u s%u i%u", o.step, o.failed, parse, build, idle);
             setRow(7, row);
         }
+        logRows("COLD");   // IOLog at t+10 s: the 5 s printf dump starts at t+30 s, after userspace has the panel
+        // fix187: GX power-on now comes AFTER the COLD rows, so the log always carries the cold-start result even when
+        // gpuOn() stalls the bus. sheng-gpu-gxstop=0 skips it entirely.
+        if (mode() >= 8 && native_gpu_cold_status == static_cast<int>(ShengGmuSuccess) && native_gpu_gxstop) gpuOn();
     }
 }
 void probeThread(void *, wait_result_t) {
@@ -1694,6 +2896,23 @@ void probeThread(void *, wait_result_t) {
     unsigned mode = 0;
     PE_parse_boot_argn("sheng-gpu-power", &mode, sizeof mode);
     if (mode > 9) mode = 9;
+    unsigned gxstop = 1;   // fix187: sheng-gpu-gxstop=0 keeps GX off even when the cold start succeeded
+    if (PE_parse_boot_argn("sheng-gpu-gxstop", &gxstop, sizeof gxstop)) native_gpu_gxstop = gxstop ? 1 : 0;
+    unsigned gxstep = 5;   // fix189: sheng-gpu-gxstep=N parks gpuOn() after sub-step N
+    if (PE_parse_boot_argn("sheng-gpu-gxstep", &gxstep, sizeof gxstep)) native_gpu_gxstep = gxstep > 5 ? 5 : static_cast<int>(gxstep);
+    unsigned gxcycle = 0;   // fix193: sheng-gpu-gxcycle=1 withdraws the GX request right after the ack
+    if (PE_parse_boot_argn("sheng-gpu-gxcycle", &gxcycle, sizeof gxcycle)) native_gpu_gxcycle = gxcycle ? 1 : 0;
+    unsigned gxdelay = 0;   // fix197: sheng-gpu-gxdelay=N holds the OOB_GPU_SET write back N seconds
+    if (PE_parse_boot_argn("sheng-gpu-gxdelay", &gxdelay, sizeof gxdelay)) native_gpu_gxdelay = gxdelay > 1800 ? 1800 : static_cast<int>(gxdelay);
+    unsigned colddelay = 0;   // fix210: sheng-gpu-colddelay=N runs the GMU cold start N seconds later (after the UI is up)
+    if (PE_parse_boot_argn("sheng-gpu-colddelay", &colddelay, sizeof colddelay)) native_gpu_colddelay = colddelay > 1800 ? 1800 : static_cast<int>(colddelay);
+    unsigned rs = 0;   // fix199: sheng-gpu-respring=N restarts backboardd N seconds after GX comes on
+    if (PE_parse_boot_argn("sheng-gpu-respring", &rs, sizeof rs)) native_gpu_respring = rs > 120 ? 120 : static_cast<int>(rs);
+    unsigned rsb = 0;   // fix199: sheng-gpu-respring-sb=N then restarts SpringBoard N seconds later
+    if (PE_parse_boot_argn("sheng-gpu-respring-sb", &rsb, sizeof rsb)) native_gpu_respring_sb = rsb > 120 ? 120 : static_cast<int>(rsb);
+    /* fix211: one read-only line, no code path changes. sane < 65536 means unix_startup's formula produced the 1024 the
+     * jetsam lines show; max_mem_actual says how much RAM the VM really got; dv is the table size that formula chose. */
+    IOLog("MUYU MEM sane=%llu max=%llu dv=%d vn=%ld mode=%u\n", muyu_probe_sane_size, muyu_probe_max_mem, muyu_probe_desiredvnodes, muyu_probe_numvnodes, mode);
     IOSleep(10000);
     native_gpu_power_stage = 1;
     unsigned have = 0;

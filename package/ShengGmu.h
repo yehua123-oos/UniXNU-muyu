@@ -47,6 +47,7 @@ typedef struct {
     uint32_t firmware_init_result,hfi_status,firmware_ready_observed,hfi_ready_observed;
     uint32_t ao_fault_status,cm3_fault_status;
     uint32_t resources_must_retain;
+    uint32_t dtcm_probe;   /* REG_GMU_CM3_DTCM_START+0xff8 before boot: picks the 0xbabeface or 0x100 ready word */
     uint8_t complete_sha256[32];
 } ShengGmuResult;
 
@@ -77,6 +78,22 @@ typedef struct {
 /* Result readiness fields are observations, never current-running assertions:
  * a later failure may already have reasserted reset. */
 ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *,const ShengGmuConfig *,ShengGmuResult *);
+/* Chip id pinned by this build's generated ShengGmuSource.h; platform callers must use it rather than a literal. */
+uint32_t ShengGmuChipId(void);
+/* Physical base and size of window <ShengGmuCore..ShengGmuCxMisc>, as the same generated header pins them.
+ * ShengGmuBindMmio() refuses any window that differs, so a platform that maps them itself must ask here. */
+uint64_t ShengGmuWindowPhysical(unsigned);
+size_t ShengGmuWindowBytes(unsigned);
+/* 2026-11-16 (GPU-HANDOFF.md §69.160) bring-up bisect switch, default 0 = off.
+ * Non-zero N makes ShengGmuLoadAndStartHfi() return ShengGmuBusy the moment internal
+ * phase N has completed, WITHOUT any rollback: whatever MMIO that phase already wrote
+ * stays in place. One boot therefore answers "does the hardware state left behind by
+ * phase N kill the UI?" for the sheng-gpu-power=7..9 ladder, which is otherwise a
+ * single indivisible step. Phases: 2 = RSC/AO setup written (GMU still in reset),
+ * 3 = firmware copied into TCM and verified, 4 = boot config registers verified,
+ * 5 = CM3 released and FW_INIT observed (still no HFI). Set by the boot argument
+ * sheng-gpu-coldstop=<n> in GpuPowerProbe.cpp. */
+extern int sheng_gmu_coldstop_level;
 
 typedef struct {
     unsigned polls_per_command,wait_interval_us;

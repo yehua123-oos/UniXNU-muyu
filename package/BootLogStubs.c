@@ -16,6 +16,10 @@ __attribute__((weak)) int boot_reset_watchdog(uint32_t seconds, char *text, unsi
     (void)seconds; (void)text; (void)cap; return -1;
 }
 __attribute__((weak)) int boot_reset_bootloader(char *text, unsigned cap) { (void)text; (void)cap; return -1; }
+// 0, not "success": a board without the glue has no ping thread to cut short, and the caller must fall back to PSCI.
+__attribute__((weak)) int boot_reset_wdt_hurry(void) { return 0; }
+// fix159: the same for the per-second tick thread's explicit ping (no watchdog glue on this board).
+__attribute__((weak)) int boot_reset_wdt_ping(void) { return 0; }
 __attribute__((weak)) uint64_t boot_diag_scan(uint64_t offset) { (void)offset; return 0; }
 __attribute__((weak)) int boot_diag_stream(int (*emit)(const void *, uint32_t, void *), void *context)
 {

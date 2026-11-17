@@ -14,7 +14,30 @@ import json
 import struct
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def board_root():
+    # Resolve the board repository (UniXNU-muyu) regardless of where this script lives.
+    candidate = ROOT / 'kits' / 'muyu'
+    if candidate.is_symlink():
+        return candidate.resolve().parent
+    br = ROOT / 'UniXNU-muyu'
+    if (br / 'board.toml').is_file():
+        return br
+    return ROOT
+
+
+def fw_root():
+    # Harvested firmware / devicetrees live in the shared fw/ checkout beside the board repository.
+    br = board_root()
+    fw = br / 'fw'
+    if fw.is_dir():
+        return fw
+    shared = br.parent / 'fw'
+    if shared.is_dir():
+        return shared
+    return fw
 
 # Order matters: it is enum {ShengGmuCore, ShengGmuRscc, ShengGmuPdc, ShengGmuGpu, ShengGmuCxMisc}.
 WINDOWS = ["gmu", "rscc", "gmu_pdc", "kgsl_3d0_reg_memory", "cx_misc"]
@@ -78,9 +101,9 @@ def sha256(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dtb", type=Path, default=ROOT / "fw/stock/dtb_3.dtb")
-    ap.add_argument("--out", type=Path, default=ROOT / "UniXNU-muyu/build/gpu/muyu-gpu-platform.json")
-    ap.add_argument("--firmware-dir", type=Path, default=ROOT / "fw/gpu-firmware")
+    ap.add_argument("--dtb", type=Path, default=fw_root() / "stock/dtb_3.dtb")
+    ap.add_argument("--out", type=Path, default=board_root() / "build/gpu/muyu-gpu-platform.json")
+    ap.add_argument("--firmware-dir", type=Path, default=fw_root() / "gpu-firmware")
     a = ap.parse_args()
 
     nodes = parse_fdt(a.dtb.read_bytes())

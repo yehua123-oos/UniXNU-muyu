@@ -7,6 +7,24 @@
 #if !defined(__aarch64__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error sheng GMU requires little-endian AArch64
 #endif
+/* The chip id this build's firmware/register policy was generated for. Exposed so a platform caller cannot pass a
+ * different id: the probe used to hardcode the A740 id (0x43050a01) while ShengGmuSource.h pins the board's own
+ * Adreno735 id (0x43030b00), and validate() refused every cold start on the first argument check. */
+uint32_t ShengGmuChipId(void)
+{
+    return SHENG_GMU_CHIP_ID;
+}
+/* The five MMIO windows ShengGmuBindMmio() compares against, from the same generated header. A caller that maps the
+ * windows itself has to use these numbers: the probe carried the sheng board's copies (GMU 0x3d6a000/0x35000 where
+ * this board's DT says 0x3d68000/0x37000), so BindMmio refused every cold start with ShengGmuArgument. */
+uint64_t ShengGmuWindowPhysical(unsigned window)
+{
+    return window < ShengGmuWindows ? sheng_gmu_window_physical[window] : 0;
+}
+size_t ShengGmuWindowBytes(unsigned window)
+{
+    return window < ShengGmuWindows ? sheng_gmu_window_bytes[window] : 0;
+}
 static int extent(uintptr_t at,size_t bytes)
 {return at && bytes && bytes-1<=UINTPTR_MAX-at;}
 static int overlap(uintptr_t a,size_t na,uintptr_t b,size_t nb)
@@ -36,14 +54,14 @@ static int notify(void *cookie)
         d->io.barrier(d->io.cookie);
 }
 static ShengGmuStatus poll(ShengGmuDevice *d,uint32_t reg,uint32_t mask,
-    uint32_t expected,unsigned budget,uint32_t *observed,ShengGmuResult *r)
+    uint32_t expected,unsigned budget,unsigned timeout_us,uint32_t *observed,ShengGmuResult *r)
 {
     uint64_t start,last,now;
     if(d->services.now_us(d->services.cookie,&start))return ShengGmuClockError;
     last=start;
     for(unsigned i=0;i<budget;++i) {
         if(d->services.now_us(d->services.cookie,&now) || now<last)return ShengGmuClockError;
-        if(now-start>=10000)return ShengGmuTimeout;
+        if(now-start>=timeout_us)return ShengGmuTimeout;
         last=now;++r->poll_reads;
         ShengGmuStatus fault=check_faults(d,r);if(fault!=ShengGmuSuccess)return fault;
         if(core_read(d,reg,observed,r))return ShengGmuIoError;
@@ -88,6 +106,17 @@ static ShengGmuStatus validate(ShengGmuDevice *d,const ShengGmuConfig *c,ShengGm
     for(unsigned i=0;i<32;++i)if(r->complete_sha256[i]!=sheng_gmu_firmware_sha256[i])return ShengGmuFirmware;
     r->complete_hash_verified=1;return ShengGmuSuccess;
 }
+/* 2026-11-16 (GPU-HANDOFF.md §69.160): bring-up bisect switch. See ShengGmu.h for the
+ * contract. Returning ShengGmuBusy without touching reset_after_failure() is deliberate:
+ * the point of the experiment is the state the phase leaves behind, so undoing it would
+ * answer a different question. */
+int sheng_gmu_coldstop_level;
+static int coldstop_reached(unsigned phase,ShengGmuResult *r)
+{
+    if(!sheng_gmu_coldstop_level || (unsigned)sheng_gmu_coldstop_level!=phase)return 0;
+    if(r)r->phase=phase;
+    return 1;
+}
 ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c,ShengGmuResult *r)
 {
     if(!r)return ShengGmuArgument;
@@ -120,6 +149,10 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
         write32(d,ShengGmuCxMisc,REG_CX_MISC_TCM_RET_CNTL*4,1,r)) {status=ShengGmuIoError;goto failed;}
     if(d->io.barrier(d->io.cookie) || read32(d,ShengGmuCxMisc,REG_CX_MISC_TCM_RET_CNTL*4,&value,r)) {status=ShengGmuIoError;goto failed;}
     if(value!=1) {status=ShengGmuStateMismatch;goto failed;}
+    /* Bisect stop 2: RSC/PDC setup writes, the FAL/TCM_RET handshake and the AO mask are
+     * already in place, but the firmware has not been copied and CM3 is still held in
+     * reset. If the UI dies with this alone, the poison is in this block, not the CM3. */
+    if(coldstop_reached(2,r))return ShengGmuBusy;
     /* All shared allocations are real owned coherent memory, not simulated
      * GMU addresses. Zero only after actual stopped/idle checks above. */
     const ShengGmuMemory *memory[]={&c->icache,&c->dummy,&c->debug,&c->log};
@@ -159,6 +192,9 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
             if(value!=le32(c->firmware+b->payload_offset+at)) {status=ShengGmuStateMismatch;goto failed;}
         }
     }
+    /* Bisect stop 3: all 15 firmware blocks are in ITCM/DTCM/icache and the TCM readback
+     * matched the image word for word. CM3 is still in reset. */
+    if(coldstop_reached(3,r))return ShengGmuBusy;
     r->phase=4;
     if(core_write(d,REG_GMU_CM3_FW_INIT_RESULT,0,r) ||
         core_write(d,REG_GMU_CM3_BOOT_CONFIG,2,r) ||
@@ -171,6 +207,7 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
     for(unsigned i=0;i<4;++i)if(write32(d,ShengGmuGpu,(REG_GBIF_QSB_SIDE0+i)*4,0x71620,r)) {status=ShengGmuIoError;goto failed;}
     if(core_write(d,REG_GMU_SYS_BUS_CONFIG,1,r) || core_write(d,REG_GMU_ICACHE_CONFIG,1,r) ||
         core_write(d,REG_GMU_DCACHE_CONFIG,1,r) || core_read(d,REG_GMU_CM3_DTCM_START+0xff8,&value,r)) {status=ShengGmuIoError;goto failed;}
+    r->dtcm_probe=value;
     uint32_t mask=value<=UINT32_C(0x20010004)?UINT32_MAX:0x1ff;
     uint32_t ready=mask==UINT32_MAX?UINT32_C(0xbabeface):0x100;
     if(core_write(d,REG_GMU_CM3_SYSRESET,1,r) || core_write(d,REG_GMU_GENERAL_9,0,r) ||
@@ -185,16 +222,24 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
         if(core_read(d,config_regs[i],&value,r)) {status=ShengGmuIoError;goto failed;}
         if(value!=config_values[i]) {status=ShengGmuStateMismatch;goto failed;}
     }
+    /* Bisect stop 4: boot configuration registers (HFI queue table, CM3_CFG, chip id, log
+     * iova, AHB fence) are written and read back verified, including the GBIF QSB side and
+     * SYS_BUS/ICACHE/DCACHE config. CM3 is still in reset - SYSRESET is still 1. */
+    if(coldstop_reached(4,r))return ShengGmuBusy;
     r->reset_verified=0;
     if(core_write(d,REG_GMU_CM3_SYSRESET,0,r) || d->io.barrier(d->io.cookie)) {status=ShengGmuIoError;goto failed;}
     r->phase=5;
-    status=poll(d,REG_GMU_CM3_FW_INIT_RESULT,mask,ready,c->poll_budget,&r->firmware_init_result,r);
+    status=poll(d,REG_GMU_CM3_FW_INIT_RESULT,mask,ready,c->poll_budget,100000,&r->firmware_init_result,r);
     if(status!=ShengGmuSuccess)goto failed;
     r->firmware_ready_observed=1;
+    /* Bisect stop 5: CM3 has been released and reported FW_INIT, i.e. firmware code is
+     * really executing, but HFI_CTRL_INIT has not been sent, so there is no HFI session,
+     * no command ring traffic and no GX vote yet. */
+    if(coldstop_reached(5,r))return ShengGmuBusy;
     if(c->pre_hfi && c->pre_hfi(c->pre_hfi_cookie)) {status=ShengGmuIoError;goto failed;}
     if(core_write(d,REG_GMU_HFI_CTRL_INIT,1,r) || d->io.barrier(d->io.cookie)) {status=ShengGmuIoError;goto failed;}
     r->phase=6;
-    status=poll(d,REG_GMU_HFI_CTRL_STATUS,1,1,c->poll_budget,&r->hfi_status,r);
+    status=poll(d,REG_GMU_HFI_CTRL_STATUS,1,1,c->poll_budget,10000,&r->hfi_status,r);
     if(status!=ShengGmuSuccess)goto failed;
     status=check_faults(d,r);if(status!=ShengGmuSuccess)goto failed;
     if(d->io.barrier(d->io.cookie)) {status=ShengGmuIoError;goto failed;}

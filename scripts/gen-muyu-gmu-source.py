@@ -34,7 +34,48 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def board_root():
+    # Resolve the board repository (UniXNU-muyu) regardless of where this script lives.
+    candidate = ROOT / 'kits' / 'muyu'
+    if candidate.is_symlink():
+        return candidate.resolve().parent
+    br = ROOT / 'UniXNU-muyu'
+    if (br / 'board.toml').is_file():
+        return br
+    return ROOT
+
+
+def fw_root():
+    # Harvested firmware / devicetrees live in the shared fw/ checkout beside the board repository.
+    br = board_root()
+    fw = br / 'fw'
+    if fw.is_dir():
+        return fw
+    shared = br.parent / 'fw'
+    if shared.is_dir():
+        return shared
+    return fw
+
+
+def gmu_pool_values():
+    # GMU payload pool: board-owned physical RAM, reserved in the UEFI memory map ("GMU Pool") and the
+    # ADT gmu-memory node, and consumed by the driver (SMMU/ring region sits 22 MiB into the pool).
+    # Must match board.toml [gpu] gmu_pool_* and the UEFI reservation (three-way consistent with uke).
+    default_base, default_bytes = 0xc8000000, 0x2000000
+    try:
+        import tomllib
+        cfg = tomllib.loads((board_root() / "board.toml").read_text())
+        gpu = cfg.get("gpu", {})
+        base = int(str(gpu.get("gmu_pool_base", f"0x{default_base:x}")), 0)
+        bytes_ = int(str(gpu.get("gmu_pool_bytes", f"0x{default_bytes:x}")), 0)
+    except Exception:
+        base, bytes_ = default_base, default_bytes
+    if bytes_ < 0x1a20000 or base & 0xfff:
+        raise SystemExit("gmu_pool must be page aligned and hold the 0x1412000 payload plus the 22 MiB GPU region")
+    return base, bytes_
 NS = {"r": "http://nouveau.freedesktop.org/"}
 WINDOW_ORDER = ["gmu", "rscc", "gmu_pdc", "kgsl_3d0_reg_memory", "cx_misc"]
 WINDOW_ENUM = ["ShengGmuCore", "ShengGmuRscc", "ShengGmuPdc", "ShengGmuGpu", "ShengGmuCxMisc"]
@@ -231,7 +272,7 @@ def gpu_chip_id(dtb, windows):
                            "--dtb", str(dtb)], capture_output=True, text=True)
     if text.returncode:
         raise SystemExit(text.stderr)
-    platform = json.loads((ROOT / "UniXNU-muyu/build/gpu/muyu-gpu-platform.json").read_text())
+    platform = json.loads((board_root() / "build/gpu/muyu-gpu-platform.json").read_text())
     if [w["name"] for w in platform["windows"]] != WINDOW_ORDER:
         raise SystemExit("unexpected window order in the platform JSON")
     # qcom,chipid lives on the kgsl node; the generated JSON records the model only, so read it directly.
@@ -316,11 +357,17 @@ def gmu_fw_chip_id(firmware, compatible):
 
 def main(argv):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(ROOT / "UniXNU-muyu/build/gpu"))
-    ap.add_argument("--dtb", default=str(ROOT / "fw/stock/dtb_3.dtb"))
-    ap.add_argument("--regs", default=str(ROOT / "fw/android-harvest/msm-regs"))
-    ap.add_argument("--driver", default=str(ROOT / "fw/android-harvest/msm-drv/a6xx_gmu.c"))
-    ap.add_argument("--firmware", default=str(ROOT / "fw/gpu-firmware/gen71100_gmu.bin"))
+    ap.add_argument("--out", default=str(board_root() / "build/gpu"))
+    ap.add_argument("--dtb", default=str(fw_root() / "stock/dtb_3.dtb"))
+    ap.add_argument("--regs", default=str(fw_root() / "android-harvest/msm-regs"))
+    ap.add_argument("--driver", default=str(fw_root() / "android-harvest/msm-drv/a6xx_gmu.c"))
+    ap.add_argument("--firmware", default=str(fw_root() / "gpu-firmware/gen71100_gmu.bin"))
+    # The SQE microcode the CP runs. It travels in the same generated object as the GMU image because both
+    # are "the firmware this board's GPU needs" and MuyuGmuFirmware.c is already compiled into the archive:
+    # adding it there needs no new build step. Before 2026-11-11 only native_adreno_sqe_firmware_image
+    # existed, and that symbol's weak default in NativeAdrenoFirmwareDefaults.cpp is a zero length, so the
+    # probe's SQE stage refused with "C2 no sqe image" and gpuStart stopped at cp=2.
+    ap.add_argument("--sqe-firmware", default=str(fw_root() / "gpu-firmware/gen71100_sqe.fw"))
     args = ap.parse_args(argv[1:])
 
     regs_dir = Path(args.regs)
@@ -330,6 +377,9 @@ def main(argv):
     windows = [(w["base"], w["size"]) for w in platform["windows"]]
     delta = windows[0][0] - windows[3][0]
     firmware = Path(args.firmware).read_bytes()
+    sqe_firmware = Path(args.sqe_firmware).read_bytes()
+    if len(sqe_firmware) < 8 or len(sqe_firmware) > 0x13000:
+        raise SystemExit(f"sqe image is {len(sqe_firmware)} B, outside the 0x13000 B SQE buffer")
     fw_chip, gpu_gen = gmu_fw_chip_id(firmware, compat)
 
     for window, offset, _value in setup:
@@ -345,9 +395,16 @@ def main(argv):
     text += f"#define SHENG_GMU_FW_CHIP_ID UINT32_C({fw_chip:#x})\n"
     text += f"#define SHENG_GMU_CORE_GPU_DELTA {delta:#x}u\n"
     text += f"#define SHENG_GMU_FIRMWARE_BYTES {len(firmware)}u\n"
+    text += f"#define SHENG_GPU_SQE_FIRMWARE_BYTES {len(sqe_firmware)}u\n"
     text += f"#define SHENG_GMU_AO_FATAL_MASK {ao_mask:#x}u\n#define SHENG_GMU_CM3_FATAL_MASK {cm3_mask:#x}u\n"
+    pool_base, pool_bytes = gmu_pool_values()
+    text += f"#define SHENG_GMU_POOL_BASE UINT64_C({pool_base:#x})\n"
+    text += f"#define SHENG_GMU_POOL_BYTES {pool_bytes}u\n"
+    text += f"#define SHENG_GPU_POOL_BASE (UINT64_C({pool_base:#x}) + UINT64_C(0x1600000))\n"
     text += ("static const uint8_t sheng_gmu_firmware_sha256[32]={"
              + ",".join(f"0x{b:02x}" for b in hashlib.sha256(firmware).digest()) + "};\n")
+    text += ("static const uint8_t sheng_gpu_sqe_firmware_sha256[32]={"
+             + ",".join(f"0x{b:02x}" for b in hashlib.sha256(sqe_firmware).digest()) + "};\n")
     text += ("static const uint64_t sheng_gmu_window_physical[5]={"
              + ",".join(f"{b:#x}" for b, _ in windows) + "};\n")
     text += ("static const size_t sheng_gmu_window_bytes[5]={"
@@ -367,11 +424,18 @@ def main(argv):
     for i in range(0, len(firmware), 16):
         lines.append("  " + ",".join(f"0x{b:02x}" for b in firmware[i:i + 16]) + ",")
     lines += ["};", f"const size_t muyu_gmu_firmware_size = {len(firmware)};", ""]
+    # The same object carries the SQE microcode, so one generated file is "everything the probe stages".
+    lines += [f"const unsigned char muyu_sqe_firmware[{len(sqe_firmware)}] = {{"]
+    for i in range(0, len(sqe_firmware), 16):
+        lines.append("  " + ",".join(f"0x{b:02x}" for b in sqe_firmware[i:i + 16]) + ",")
+    lines += ["};", f"const size_t muyu_sqe_firmware_size = {len(sqe_firmware)};", ""]
     fw_c.write_text("\n".join(lines))
     report = dict(gpu_chip_id=f"{chip:#x}", gpu_compatible=compat,
                   gpu_gen=".".join(str(v) for v in gpu_gen), gmu_fw_chip_id=f"{fw_chip:#x}",
                   gmu_fw_chip_id_source="chip-id compare literal in the CM3 image (0x10004104 + value)",
                   firmware=dict(bytes=len(firmware), sha256=hashlib.sha256(firmware).hexdigest()),
+                  sqe_firmware=dict(bytes=len(sqe_firmware), sha256=hashlib.sha256(sqe_firmware).hexdigest(),
+                                    path=str(args.sqe_firmware)),
                   core_gpu_delta=f"{delta:#x}", windows=[{"enum": e, "name": n, "base": f"{b:#x}", "bytes": f"{s:#x}"}
                                                          for e, n, (b, s) in zip(WINDOW_ENUM, WINDOW_ORDER, windows)],
                   rsc_setup=[{"window": w, "byte_offset": f"{o:#x}", "value": f"{v:#x}"} for w, o, v in setup],

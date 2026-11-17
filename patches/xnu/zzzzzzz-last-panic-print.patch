@@ -121,6 +121,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -8017,6 +8017,12 @@
+ void
  load_init_program(proc_t p)
  {
  	boot_progress_stage("load_init_program enter");

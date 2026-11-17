@@ -43,7 +43,30 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def board_root():
+    # Resolve the board repository (UniXNU-muyu) regardless of where this script lives.
+    candidate = ROOT / 'kits' / 'muyu'
+    if candidate.is_symlink():
+        return candidate.resolve().parent
+    br = ROOT / 'UniXNU-muyu'
+    if (br / 'board.toml').is_file():
+        return br
+    return ROOT
+
+
+def fw_root():
+    # Harvested firmware / devicetrees live in the shared fw/ checkout beside the board repository.
+    br = board_root()
+    fw = br / 'fw'
+    if fw.is_dir():
+        return fw
+    shared = br.parent / 'fw'
+    if shared.is_dir():
+        return shared
+    return fw
 MUYU_GPU_NODE = "/soc/qcom,kgsl-3d0@3d00000"
 MUYU_GMU_NODE = "/soc/qcom,gmu@3d69000"
 MUYU_CMD_DB_NODE = "/reserved-memory/aop_cmd_db_region@81c60000"
@@ -284,9 +307,9 @@ def write_header(out, chip_id, model, opps, policy, command_db):
 def main(argv):
     global CATALOG
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(ROOT / "UniXNU-muyu/build/gpu"))
-    ap.add_argument("--dtb", default=str(ROOT / "fw/stock/dtb_3.dtb"))
-    ap.add_argument("--catalog", default=str(ROOT / "fw/android-harvest/msm-drv/a7xx_catalog.c"))
+    ap.add_argument("--out", default=str(board_root() / "build/gpu"))
+    ap.add_argument("--dtb", default=str(fw_root() / "stock/dtb_3.dtb"))
+    ap.add_argument("--catalog", default=str(fw_root() / "android-harvest/msm-drv/a7xx_catalog.c"))
     args = ap.parse_args(argv[1:])
     CATALOG = args.catalog
 

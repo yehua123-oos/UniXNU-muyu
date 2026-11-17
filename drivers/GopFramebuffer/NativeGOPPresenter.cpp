@@ -132,13 +132,32 @@ bool NativeGOPPresenter::offer(void *display,IOMemoryDescriptor *memory,uint64_t
     if(!gpuMode || !memory || !display || !gate)return false;
     IOLockLock(gate);
     bool accepted=online && gpuClient && !swap.offered;
+    /* fix140: `MUYU OFF10 acc` alternated once the offered stride was corrected (fix139),
+     * so snapshot WHICH of the three gate conditions refused the frame. */
+    const bool snapOnline=online,snapClient=gpuClient,snapBusy=swap.offered;
+    const uint64_t snapSeq=swapSequence;
     if(accepted) {
         memory->retain();
         swap={true,false,++swapSequence,display,memory,nullptr,stride,width,height};
         native_gop_gpu_offers=native_gop_gpu_offers+1;
         IOLockWakeup(gate,&swap,false);
     }
-    IOLockUnlock(gate);return accepted;
+    IOLockUnlock(gate);
+    {
+        /* fix153: the old <=8 / every-32 throttle made "8 done" look like a hard limit.
+         * Print the whole 9..24 band and carry the running totals so a stalled client
+         * (offers growing while completions stay at 8) is visible without a screen. */
+        static unsigned offerN;++offerN;
+        if(offerN<=24 || !(offerN&15u))
+            IOLog("MUYU SWAPD offer n=%u acc=%u online=%u client=%u busy=%u seq=%llu stride=%llu"
+                  " o=%llu c=%llu f=%llu a=%llu w=%llu to=%llu\n",
+                  offerN,accepted?1u:0u,snapOnline?1u:0u,snapClient?1u:0u,snapBusy?1u:0u,
+                  (unsigned long long)snapSeq,(unsigned long long)stride,
+                  (unsigned long long)native_gop_gpu_offers,(unsigned long long)native_gop_gpu_completions,
+                  (unsigned long long)native_gop_gpu_failures,(unsigned long long)native_gop_gpu_abandoned,
+                  (unsigned long long)native_gop_wait_stats[0],(unsigned long long)native_gop_wait_stats[1]);
+    }
+    return accepted;
 }
 IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *out) {
     if(!gpuMode)return kIOReturnUnsupported;
@@ -156,6 +175,16 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
             if(!native_gop_wait_stats[4] || ns<native_gop_wait_stats[4])native_gop_wait_stats[4]=ns;
             if(ns>native_gop_wait_stats[5])native_gop_wait_stats[5]=ns;
             native_gop_wait_stats[6]=native_gop_wait_stats[6]+ns;
+            {
+                /* fix153: was the 9th frame lost to a timed-out wait, or did the
+                 * client take the frame and never come back with completeSwap()? */
+                static unsigned toN;++toN;
+                if(toN<=24 || !(toN&15u))
+                    IOLog("MUYU SWAPT n=%u ns=%llu offered=%u delivered=%u o=%llu c=%llu w=%llu to=%llu\n",
+                          toN,(unsigned long long)ns,swap.offered?1u:0u,swap.delivered?1u:0u,
+                          (unsigned long long)native_gop_gpu_offers,(unsigned long long)native_gop_gpu_completions,
+                          (unsigned long long)native_gop_wait_stats[0],(unsigned long long)native_gop_wait_stats[1]);
+            }
             return kIOReturnTimeout;
         }
     }
@@ -174,13 +203,42 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
     swap.map=map;
     out->sequence=sequence;out->address=map->getVirtualAddress();out->bytes=map->getLength();out->stride=stride;
     out->width=width;out->height=height;out->format=NGP_BGRX8888;out->reserved=0;
-    IOLockUnlock(gate);return kIOReturnSuccess;
+    const uint64_t snapAddr=out->address,snapBytes=out->bytes;
+    IOLockUnlock(gate);
+    {
+        /* fix140: prove the client actually received the frame and with what geometry. */
+        static unsigned waitN;++waitN;
+        if(waitN<=24 || !(waitN&15u))
+            IOLog("MUYU SWAPD wait n=%u seq=%llu addr=%08x%08x bytes=%llu stride=%llu %ux%u fmt=%u\n",
+                  waitN,(unsigned long long)sequence,(uint32_t)(snapAddr>>32),(uint32_t)snapAddr,
+                  (unsigned long long)snapBytes,(unsigned long long)stride,width,height,
+                  (unsigned)NGP_BGRX8888);
+    }
+    return kIOReturnSuccess;
 }
 IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence,int status) {
     IOLockLock(gate);
-    if(!swap.offered || !swap.delivered || swap.sequence!=sequence) {IOLockUnlock(gate);return kIOReturnBadArgument;}
+    if(!swap.offered || !swap.delivered || swap.sequence!=sequence) {
+        /* fix153: a completion that arrives for a swap nobody offered (or twice for
+         * one swap) used to be a silent kIOReturnBadArgument. */
+        const bool o=swap.offered,d=swap.delivered;const uint64_t s=swap.sequence;
+        IOLockUnlock(gate);
+        IOLog("MUYU SWAPX seq=%llu status=%08x offered=%u delivered=%u cur=%llu\n",
+              (unsigned long long)sequence,(unsigned)status,o?1u:0u,d?1u:0u,(unsigned long long)s);
+        return kIOReturnBadArgument;
+    }
     auto done=swap;swap={};
     IOLockUnlock(gate);
+    /* fix140: the client's verdict is the missing number. GpuScanoutClient.h sends
+     * status 0 only when presenter_->present() returned kOk; everything else comes
+     * back as 0xe00002bc (kBadFrame / kNoResource / kGpuFailed). One line decides
+     * whether the compute copy ever ran or the frame was refused before encoding. */
+    {
+        static unsigned doneN;++doneN;
+        if(doneN<=24 || !(doneN&15u))
+            IOLog("MUYU SWAPD done n=%u seq=%llu status=%08x map=%u\n",
+                  doneN,(unsigned long long)sequence,(unsigned)status,done.map?1u:0u);
+    }
     OSSafeReleaseNULL(done.map);done.memory->release();
     if(status)__atomic_fetch_add(&native_gop_gpu_failures,1,__ATOMIC_RELAXED);
     else native_gop_gpu_completions=native_gop_gpu_completions+1;

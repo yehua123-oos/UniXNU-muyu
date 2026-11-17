@@ -81,10 +81,20 @@ stub_command = [str(stub_source) if arg == str(source) else str(stub_obj) if arg
                 for arg in command]
 subprocess.run(stub_command, cwd=record['directory'], check=True, timeout=120)
 
+# Reboot-into-fastboot glue: PSCI SYSTEM_RESET plus the PMIC's reboot-reason cell (BootResetCore.h). Same osfmk header set as BootLog.c.
+# The archive is linked with -force_load, so this object is always in the kernel, and its strong boot_reset_* definitions override the
+# weak stand-ins in BootLogStubs.o. Those stubs stay: they are what a board without the glue compiles against.
+reset_source = ROOT / 'kits/muyu/BootReset.c'
+reset_obj = OUT / 'BootReset.o'
+reset_command = [str(reset_source) if arg == str(source) else str(reset_obj) if arg == str(obj) else arg
+                 for arg in command]
+subprocess.run(reset_command, cwd=record['directory'], check=True, timeout=120)
+(OUT / 'reset-compile-command.json').write_text(json.dumps(reset_command, indent=2) + '\n')
+
 archive = OUT / 'libBravearkLastLog.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(policy_obj), str(crash_obj), str(bootlog_obj),
-                str(stub_obj)], check=True, timeout=30)
+                str(stub_obj), str(reset_obj)], check=True, timeout=30)
 (OUT / 'build-report.json').write_text(json.dumps({
     'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
     'object_sha256': hashlib.sha256(obj.read_bytes()).hexdigest(),
@@ -94,6 +104,8 @@ subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(policy_obj), s
     'crash_object_sha256': hashlib.sha256(crash_obj.read_bytes()).hexdigest(),
     'bootlog_source_sha256': hashlib.sha256(bootlog_source.read_bytes()).hexdigest(),
     'bootlog_object_sha256': hashlib.sha256(bootlog_obj.read_bytes()).hexdigest(),
+    'reset_source_sha256': hashlib.sha256(reset_source.read_bytes()).hexdigest(),
+    'reset_object_sha256': hashlib.sha256(reset_obj.read_bytes()).hexdigest(),
     'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
     'hardware_execution': False,
 }, indent=2) + '\n')

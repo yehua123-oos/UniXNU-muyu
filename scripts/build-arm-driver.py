@@ -8,6 +8,32 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def board_root():
+    # Resolve the board repository (UniXNU-muyu) regardless of where this script lives.
+    #  * assembled tree:  ROOT is the tree, the package is kits/muyu (a symlink to the repo).
+    #  * board repo:      ROOT is UniXNU-muyu itself.
+    #  * sibling layout:  ROOT is the workspace parent; the repo is ROOT/UniXNU-muyu.
+    candidate = ROOT / 'kits' / 'muyu'
+    if candidate.is_symlink():
+        return candidate.resolve().parent
+    br = ROOT / 'UniXNU-muyu'
+    if (br / 'board.toml').is_file():
+        return br
+    return ROOT
+
+
+def fw_root():
+    # Harvested firmware / devicetrees live in the shared fw/ checkout beside the board repository.
+    br = board_root()
+    fw = br / 'fw'
+    if fw.is_dir():
+        return fw
+    shared = br.parent / 'fw'
+    if shared.is_dir():
+        return shared
+    return fw
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('component', choices=['ArmVirtPlatform', 'ArmDTPlatform', 'ArmCpu', 'SoftwareAES', 'VirtioMmioBlock', 'RamBlock', 'GopFramebuffer', 'VirtioMmioConsole', 'NativeLegacyDisplay', 'NativeGOPPresenter', 'NativeOfflineGPU', 'NativeOfflineAccelerator', 'NativeIOGPUProviderProbe', 'ShengUfs', 'ShengHidInput', 'AppleKeyStoreState', 'Adreno740'])
 parser.add_argument('--negative-aes-kat', action='store_true', help='Isolated own-source wrong-answer refusal control; never changes original inputs')
@@ -88,9 +114,16 @@ if component=='NativeOfflineGPU':
 if component in ('NativeLegacyDisplay','ShengHidInput'):
     command += ['-I', str(out)]
 if component == 'Adreno740':
+    # SM8635 (muyu) native Adreno: the shared Adreno740 driver plus the board's pinned GMU/SMMU
+    # sources. The generated ShengGmu*.h headers live in build/gpu (gen-muyu-gmu-*-source.py); the
+    # umbrella ShengGmu.h / ShengGmuCommandDb.h and the iOS 17 GPU-role shim live in the board
+    # package (kits/muyu). 21H461 lacks the iOS 26/27 task_get_gpu_role() API, so we force-include
+    # MuyuGpuRoleCompat.h and compile MuyuGpuRoleCompat.c into the same archive.
     command += ['-I', str(ROOT / 'kits/ArmSmmu4K'), '-I', str(ROOT / 'kits/AdrenoPM4'),
-                '-I', str(ROOT / 'kits/braveark'), '-I', str(ROOT / 'kits/AdrenoFirmware'),
-                '-I', str(ROOT / 'build/sheng-gmu')]
+                '-I', str(ROOT / 'kits/AdrenoFirmware'),
+                '-I', str(board_root() / 'build/gpu'),
+                '-I', str(ROOT / 'kits/muyu')]
+    command += ['-include', str(ROOT / 'kits/muyu/MuyuGpuRoleCompat.h')]
 # The XNU line decides which of a few changed kernel APIs the driver may use (see UfsXnuCompat.h).
 version = os.environ.get('UNIXNU_XNU_VERSION', '')
 if version:
@@ -130,5 +163,139 @@ if deployment != wanted_deployment:
                      f'from -miphoneos-version-min={minimum})')
 archive = out / ('lib' + component + '.a')
 archive.unlink(missing_ok=True)
-subprocess.run(['xcrun', 'ar', 'rcs', archive, destination], check=True)
+objects = [destination]
+if component == 'Adreno740':
+    # Compile the iOS 17 GPU-role shim (C) against the same kernel ABI and add it to the archive.
+    # The C++ recipe drives a .cpp; we retarget it to C in place (-xc++ -> -xc), drop the C++-only
+    # std and -fapple-kext, and point it at kits/muyu/MuyuGpuRoleCompat.c.
+    compat_src = ROOT / 'kits/muyu/MuyuGpuRoleCompat.c'
+    compat_obj = out / 'MuyuGpuRoleCompat.o'
+    ccmd = []
+    idx = 0
+    while idx < len(arguments):
+        v = arguments[idx]
+        if v == record['file']:
+            ccmd.append(str(compat_src))
+        elif v == '-o':
+            ccmd.extend(['-o', str(compat_obj)]); idx += 1
+        elif v == '-Xclang' and idx + 1 < len(arguments) and arguments[idx + 1].startswith('-W'):
+            idx += 1
+        elif v == '-xc++':
+            ccmd.append('-xc')
+        elif v.startswith('-std=') and '++' in v:
+            pass
+        elif v == '-fapple-kext':
+            pass
+        elif not v.startswith('-W'):
+            ccmd.append(v)
+        idx += 1
+    ccmd += ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+             '-I', str(ROOT / '.cache/xnu-work/osfmk')]
+    cr = subprocess.run(ccmd, cwd=record['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    (out / 'MuyuGpuRoleCompat-compile.log').write_text(cr.stdout)
+    if cr.returncode:
+        raise SystemExit(cr.stdout[-3500:])
+    objects.append(compat_obj)
+    # NativeAdrenoService.cpp is only the IOService front end. Every implementation it calls
+    # (board/VM/ring/GMU/firmware/SMMU/PM4/user-client) lives in the other driver TUs; the 27
+    # line archives them separately with build-adreno740-kits.py. On this 17 line there is no
+    # kits manifest entry, so fold them into the same archive: CONFIG_XNU_NATIVE_ADRENO then
+    # needs just the one -force_load of libAdreno740.a. NativeAdrenoFirmwareDefaults.cpp also
+    # supplies the weak empty firmware images the service declares, so a link without the
+    # harvested blobs still resolves (and validate() refuses a zero-length image).
+    # NativeAdrenoClient.cpp is the userland client, NativeAdrenoAccelerator.cpp is staged
+    # Tier-2 (its initializer must not run at boot), NativeAdrenoService.cpp is destination.
+    kit_sources = sorted(p for p in (ROOT / 'drivers/Adreno740').glob('NativeAdreno*.cpp')
+                         if p.name not in ('NativeAdrenoClient.cpp', 'NativeAdrenoService.cpp',
+                                           'NativeAdrenoAccelerator.cpp'))
+    for kit_src in kit_sources:
+        kit_obj = out / (kit_src.stem + '.kit.o')
+        kit_command = []
+        index = 0
+        while index < len(command):
+            value = command[index]
+            if value == str(source):
+                kit_command.append(str(kit_src))
+            elif value == '-o':
+                kit_command.extend(['-o', str(kit_obj)])
+                index += 1
+            elif value in ('-MF', '-MJ'):
+                index += 1
+            elif value in ('-MD', '-MP'):
+                pass
+            else:
+                kit_command.append(value)
+            index += 1
+        kit_command += ['-I', str(ROOT / 'drivers/Adreno740')]
+        kit_result = subprocess.run(kit_command, cwd=record['directory'], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+        (out / (kit_src.stem + '-compile.log')).write_text(kit_result.stdout)
+        if kit_result.returncode:
+            raise SystemExit(kit_src.name + ':\n' + kit_result.stdout[-3500:])
+        objects.append(kit_obj)
+    # The kits call into the PM4 packet encoder, which the 17-line legacy display
+    # archive does not compile (it only needs the GMU/HFI/SMMU C kits). Add just
+    # AdrenoPM4.c: it is self-contained, its helpers are static.
+    #
+    # Two kernel hooks supplied by the iPadOS 27 XNU patch series do not exist in
+    # 21H461. The driver declares them weak_import, but a static kernel link still
+    # needs a definition, and native_gpu_dcvs[1] is read through an array address
+    # unconditionally, so leaving it unresolved would fault at runtime. These inert
+    # weak defaults match drivers/Adreno740/tests/HostKernelHooks.cpp on the 27 line:
+    # DCVS stays off and the pmap reverse lookup reports no user mapping.
+    shim_source = out / 'MuyuAdrenoKernelShims.c'
+    shim_source.write_text('''/* 21H461 kernel shims for the Adreno740 kits (see build-arm-driver.py). */
+#include <stdint.h>
+__attribute__((weak)) volatile uint32_t native_gpu_dcvs[15] = {0};
+__attribute__((weak)) unsigned int
+native_pmap_user_mappings(unsigned int ppnum, void **first_pmap,
+                          uint64_t *first_va, char *first_name)
+{
+    (void)ppnum;
+    (void)first_pmap;
+    (void)first_va;
+    (void)first_name;
+    return 0;
+}
+''')
+    c_recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o.json'
+    c_record = json.loads(c_recipe.read_text().strip().rstrip(','))
+    c_base = []
+    index = 0
+    while index < len(c_record['arguments']):
+        value = c_record['arguments'][index]
+        if value == '-Xclang' and index + 1 < len(c_record['arguments']) \
+                and c_record['arguments'][index + 1].startswith('-W'):
+            index += 1
+        elif value in ('-MF', '-MJ'):
+            index += 1
+        elif value in ('-MD', '-MP') or value.startswith('-W'):
+            pass
+        else:
+            c_base.append(value)
+        index += 1
+    c_base += ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+               '-Wno-incompatible-sysroot', '-I', str(ROOT / '.cache/xnu-work/osfmk'),
+               '-I', str(ROOT / 'kits/AdrenoPM4')]
+    for c_src, c_obj in ((ROOT / 'kits/AdrenoPM4/AdrenoPM4.c', out / 'AdrenoPM4.kit.o'),
+                         (shim_source, out / 'MuyuAdrenoKernelShims.o')):
+        c_command = []
+        index = 0
+        while index < len(c_base):
+            value = c_base[index]
+            if value == c_record['file']:
+                c_command.append(str(c_src))
+            elif value == '-o':
+                c_command.extend(['-o', str(c_obj)])
+                index += 1
+            else:
+                c_command.append(value)
+            index += 1
+        c_result = subprocess.run(c_command, cwd=c_record['directory'], stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True)
+        (out / (c_src.stem + '-compile.log')).write_text(c_result.stdout)
+        if c_result.returncode:
+            raise SystemExit(c_src.name + ':\n' + c_result.stdout[-3500:])
+        objects.append(c_obj)
+subprocess.run(['xcrun', 'ar', 'rcs', archive, *objects], check=True)
 print(f'{component}: -Werror build and actual ARM64/iOS 17 object audit passed')

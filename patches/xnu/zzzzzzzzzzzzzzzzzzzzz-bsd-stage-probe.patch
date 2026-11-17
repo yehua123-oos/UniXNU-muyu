@@ -1,0 +1,68 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -563,10 +563,14 @@
+ 	}
+ }
+ #endif
++
++/* MUYU bsd1 probe: read-only stage ladder for bsd_init(), 0 means "never entered". */
++volatile int muyu_bsd_stage = 0;
+ 
+ void
+ bsd_init(void)
+ {
++	muyu_bsd_stage = 1;
+ 	boot_progress_stage("bsd_init enter");
+ 	struct uthread *ut;
+ 	vnode_t init_rootvnode = NULLVP;
+@@ -1004,6 +1008,7 @@
+ 
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
++	muyu_bsd_stage = 2;
+ 
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+@@ -1018,6 +1023,7 @@
+ 		bsd_init_kprintf("vfs_mountroot\n");
+ 		boot_progress_stage("vfs_mountroot enter");
+ 		if (0 == (err = vfs_mountroot())) {
++			muyu_bsd_stage = 3;
+ 			boot_progress_stage("vfs_mountroot mounted; authentication pending");
+ 			break;
+ 		}
+@@ -1054,6 +1060,7 @@
+ 	set_rootvnode(init_rootvnode);
+ 	lck_rw_unlock_exclusive(&rootvnode_rw_lock);
+ 	init_rootvnode = NULLVP;  /* use rootvnode after this point */
++	muyu_bsd_stage = 4;
+ 
+ 
+ 	if (!bsd_rooted_ramdisk()) {
+@@ -1114,6 +1121,7 @@
+ #endif
+ 		}
+ 	}
++	muyu_bsd_stage = 5;
+ 
+ 
+ #if CONFIG_NETBOOT
+@@ -1166,6 +1174,7 @@
+ 		devfs_kernel_mount(mounthere);
+ 	}
+ #endif /* DEVFS */
++	muyu_bsd_stage = 6;
+ 
+ #if CONFIG_BASESYSTEMROOT
+ #if CONFIG_IMAGEBOOT
+@@ -1289,7 +1298,9 @@
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++	muyu_bsd_stage = 7;
+ 	load_init_program(p);
++	muyu_bsd_stage = 8;
+ 	lock_trace = 1;
+ }
+ 

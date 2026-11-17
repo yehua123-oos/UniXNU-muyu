@@ -48,8 +48,9 @@ CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 #       the base build refuses it without the audited UFS/owner-root, VirtIO
 #       and source-crypto set.
 #   NATIVE_ADRENO
-#       the driver currently knows the Adreno 740; the uke GPU is an
-#       Adreno 732 and its firmware/power values are not collected yet.
+#       the Adreno 735 (SM8635) profile and GPU/GMU/SQE firmware are now
+#       collected (board.toml [gpu]); uke's A732 baseline is ported via the
+#       build-arm-driver.py Adreno740 archive.
 #
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
@@ -64,7 +65,7 @@ CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 # CONFIG_XNU_BOOT_PROGRESS is not set
 CONFIG_XNU_BOOT_LOG=y
 CONFIG_XNU_WATCHDOG_POLICY=y
-# CONFIG_XNU_NATIVE_ADRENO is not set
+CONFIG_XNU_NATIVE_ADRENO=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="58B481F8-4243-4430-BF60-DDD1638D4C6E"

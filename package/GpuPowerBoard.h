@@ -33,14 +33,21 @@
 #define GPB_CBCR_CLK_OFF (1u << 31)       // clk-branch.c: BRANCH_CLK_OFF; a running branch reads 0
 #define GPB_CBCR_ENABLE (1u << 0)
 
-// gpucc-sm8550.c: gpu_cc_cx_gdsc gdscr 0x9108, gpu_cc_gx_gdsc gdscr 0x905c; gpu_cc_ahb_clk 0x911c; gpu_cc_cx_gmu_clk 0x913c;
-// gpu_cc_hlos1_vote_gpu_smmu_clk 0x7000. gdsc.c: PWR_ON_MASK BIT(31), SW_COLLAPSE_MASK BIT(0).
-#define GPB_CC_CX_GDSCR 0x9108
-#define GPB_CC_GX_GDSCR 0x905c
-#define GPB_CC_AHB_CLK 0x911c
-#define GPB_CC_CX_GMU_CLK 0x913c
+// This device is "cliffs", whose GPUCC is NOT the SM8550/SM8650 layout: docs/GPU-CLIFFS-MMIO.md §2.1/§2.3 took the
+// offsets from the running Android's gpucc clock tree and DT reg properties, and they differ from gpucc-sm8550.c for
+// every register this probe touches. The values below used to be the SM8550 ones (0x9108 CX GDSCR, 0x905c GX GDSCR,
+// 0x911c ahb, 0x913c cx_gmu, 0x953c gds_hw_ctrl); reading them here returned 0 for every field, which the caller then
+// reported as "CX never powered" (pw00, sm=skip, gp=skip) and stopped the whole bring-up at stage 3. A collapsed
+// GDSCR cannot read 0 -- SW_COLLAPSE alone makes it 0x1 -- so the zero was the tell that these addresses were wrong.
+// gdsc.c semantics are unchanged: PWR_ON_MASK BIT(31), SW_COLLAPSE_MASK BIT(0).
+#define GPB_CC_CX_GDSCR 0x908c            // gpu_cc_cx_bcr 0x9088 + 4
+#define GPB_CC_GX_GDSCR 0x9034            // gpu_cc_gx_bcr 0x9030 + 4
+#define GPB_CC_GX_CFG_GDSCR 0x9038        // gpu_cc_gx_gdsc is "qcom,support-cfg-gdscr": gdsc.c polls THIS bit16
+#define GPB_CC_AHB_CLK 0x90c8             // gpu_cc_ahb_clk (SM8650 has it at 0x911c)
+#define GPB_CC_CRC_AHB_CLK 0x90cc         // gpu_cc_crc_ahb_clk
+#define GPB_CC_CX_GMU_CLK 0x90e4          // gpu_cc_cx_gmu_clk, AON (SM8650 has it at 0x913c)
 #define GPB_CC_SMMU_VOTE_CLK 0x7000
-#define GPB_CC_CX_GDS_HW_CTRL 0x953c      // gpu_cc_cx_gdsc.gds_hw_ctrl: with it set, gdsc.c polls PWR_ON here (VOTABLE)
+#define GPB_CC_CX_GDS_HW_CTRL 0x90a0      // gpu_cc_cx_gdsc.gds_hw_ctrl: with it set, gdsc.c polls PWR_ON here (VOTABLE)
 #define GPB_GDSC_RETAIN_MEM (1u << 14)    // gdsc.c RETAIN_MEM / RETAIN_PERIPH, set by gdsc_force_mem_on; RETAIN_FF_ENABLE bit 11
 #define GPB_GDSC_RETAIN_PERIPH (1u << 13)
 #define GPB_GDSC_RETAIN_FF (1u << 11)

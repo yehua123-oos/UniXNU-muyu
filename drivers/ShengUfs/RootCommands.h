@@ -290,12 +290,31 @@ static bool hostStoreOpen (uint64_t first, uint64_t blocks)
 }
 
 // WRITE(10) of `blocks` 4096-byte blocks from src to lba on LUN 0; the range must lie inside one open window.
-static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const void *src, bool fua = false)
+// Everything on LUN 0 goes through one lock and one request slot, and the guest's own APFS traffic shares it. A plain IOLockLock has no
+// deadline, so a write that is queued behind a long APFS command simply never returns: on fix25-fix27 the log writer's round 44 started at
+// 174 s and never finished, while the device ran to 197-203 s. waitMs > 0 makes the wait bounded and reports a give-up instead; 0 keeps
+// the blocking path for the store, where a skipped write would be data loss.
+static uint32_t gHostLockStalls, gHostLockStallMs;
+
+static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const void *src, bool fua = false, uint32_t waitMs = 0)
 {
   if (!gHost.ready || !src || !blocks || blocks > kDataMax / 4096 || lun != 0 || !hostInWindow (lba, blocks)) {
     return kIOReturnBadArgument;
   }
-  IOLockLock (gHost.lock);
+  if (waitMs) {
+    if (!IOLockTryLock (gHost.lock)) {
+      uint32_t waited = 0;
+      boolean_t got = FALSE;
+      while (waited < waitMs) {
+        IOSleep (5); waited += 5;
+        if (IOLockTryLock (gHost.lock)) { got = TRUE; break; }
+      }
+      if (waited > gHostLockStallMs) gHostLockStallMs = waited;
+      if (!got) { gHostLockStalls++; return kIOReturnTimeout; }
+    }
+  } else {
+    IOLockLock (gHost.lock);
+  }
   gRootDiagnostic.lba = lba;
   memcpy (gHost.virt + kDataOffset, src, blocks * 4096U);
   uint8_t cdb[10] = { 0x2a, uint8_t (fua ? 0x08 : 0), uint8_t (lba >> 24), uint8_t (lba >> 16), uint8_t (lba >> 8), uint8_t (lba),

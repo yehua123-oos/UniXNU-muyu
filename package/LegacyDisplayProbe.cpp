@@ -21,6 +21,21 @@ extern "C" void native_gop_presenter_static_init(void) __asm__("__GLOBAL__sub_I_
 extern "C" IOService *native_gop_presenter_create(void);
 static IOService *pendingLegacyDisplay;
 static IOService *activeGOPPresenter,*activeGOPNub;
+// 2026-11-11 GPU hand-off bridge: 17-line 5-argument ABI, ported from
+// UniXNU-sheng/package/LegacyDisplayProbe.cpp:23-27,254-259. The 27-line uke
+// version takes an extra `format` argument and MUST NOT be copied here.
+static IOService *gpuHandoffPresenter;
+extern "C" bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
+extern "C" void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
+volatile uint32_t native_legacy_gpu_fallbacks,native_legacy_gpu_last_status;
+volatile uint32_t native_legacy_gpu_offer_calls,native_legacy_gpu_offer_refused;
+// Declarations only (definitions live later in this file / in NativeGOPPresenter.cpp),
+// so the GPU hand-off helpers above the extern "C" block can read them.
+extern "C" {
+extern volatile uint64_t native_gop_gpu_offers,native_gop_gpu_completions,native_gop_gpu_failures;
+extern volatile uint32_t native_legacy_transfer_calls;
+extern volatile int native_legacy_transfer_status,native_legacy_swap_hold;
+}
 static IOService *activeLegacyDisplay;
 // Keep one diagnostic mapping alive until reboot, even after backend stop.
 // The pulse is permanently closed before any system-frame copy.
@@ -47,6 +62,40 @@ static bool publishOrMatchWord(IORegistryEntry *entry,const char *key,uint32_t v
 }
 // Bring-up: text console park/unpark (osfmk/console/video_console.c).
 extern "C" void vc_set_text_quiet(int) __attribute__((weak_import));
+// 2026-11-11: strong definitions that replace the weak stubs in LegacyDisplayStubs.c.
+// Without them native_legacy_gpu_offer() always returns false, so every frame takes
+// the CPU copy and the GPU never takes over the display (GPU-ONDEVICE.md §13).
+// Explicit extern "C" is required: NativeLegacyDisplay.cpp declares the C symbol.
+extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *memory,uint64_t stride,uint32_t width,uint32_t height) {
+    native_legacy_gpu_offer_calls=native_legacy_gpu_offer_calls+1;
+    bool accepted=gpuHandoffPresenter && native_gop_gpu_offer(gpuHandoffPresenter,display,memory,stride,width,height);
+    if(!accepted)native_legacy_gpu_offer_refused=native_legacy_gpu_offer_refused+1;
+    // Rate-limited msgbuf evidence: the panel dump snapshots msgbuf, so these lines
+    // survive even after the graphics client paints over the text console.
+    if(native_legacy_gpu_offer_calls<=3 || (native_legacy_gpu_offer_calls%64)==0)
+        IOLog("MUYU OFFER n=%u acc=%d pres=%d tc=%u\n",
+            (unsigned)native_legacy_gpu_offer_calls,accepted?1:0,gpuHandoffPresenter?1:0,
+            (unsigned)native_legacy_transfer_calls);
+    return accepted;
+}
+extern "C" void native_legacy_gpu_fallback_observed(int status) {
+    native_legacy_gpu_last_status=(uint32_t)status;native_legacy_gpu_fallbacks=native_legacy_gpu_fallbacks+1;
+}
+// One cross-archive call replaces six weak_import data references: every counter is
+// read here, next to its strong definition, so "0" can no longer mean "symbol did not
+// bind". BravearkLastLog.c prints "nolink" if this function is absent.
+extern "C" void muyu_handoff_snapshot(char *out,unsigned cap) {
+    if(!out || !cap)return;
+    out[0]=0;
+    snprintf(out,cap,
+        "calls=%u refused=%u o=%llu c=%llu f=%llu fb=%u tc=%u ts=%08x hold=%d pres=%d",
+        (unsigned)native_legacy_gpu_offer_calls,(unsigned)native_legacy_gpu_offer_refused,
+        (unsigned long long)native_gop_gpu_offers,(unsigned long long)native_gop_gpu_completions,
+        (unsigned long long)native_gop_gpu_failures,
+        (unsigned)native_legacy_gpu_fallbacks,(unsigned)native_legacy_transfer_calls,
+        (unsigned)native_legacy_transfer_status,(int)native_legacy_swap_hold,
+        gpuHandoffPresenter?1:0);
+}
 extern "C" {
 volatile uint32_t native_legacy_stage;
 volatile uint32_t native_legacy_console_quiet;
@@ -184,7 +233,21 @@ void native_legacy_frame_colors_observed(const uint32_t *colors,const uint64_t *
 void native_legacy_swap_validation_observed(bool accepted,unsigned reason,const void *request,const void *surface) {
     native_legacy_validate_seconds=native_legacy_seconds_now();
     if(accepted)native_legacy_swap_accepted_count=native_legacy_swap_accepted_count+1;
-    else {native_legacy_swap_rejected_count=native_legacy_swap_rejected_count+1;recordRejectedSwap(reason,request,surface);}
+    else {native_legacy_swap_rejected_count=native_legacy_swap_rejected_count+1;recordRejectedSwap(reason,request,surface);
+        // 2026-11-14 01:0x: with the Adreno plugin finally loading (fix31, owner trust cache), the graphics client moved to the
+        // accelerated swap path and every frame fails validateSwap — 304 "verify_swap failed for swap id: N" lines ended that boot
+        // and no MUYU OFFER appeared, so the frame never reaches our presenter. The reason code and the very fields the check reads
+        // were only recorded for the panel; put them in msgbuf, rejections only and rate limited so a 60 Hz loop cannot own the window.
+        static unsigned logged=0;
+        if(++logged<=8 || (logged%256)==0)
+            IOLog("MUYU REJ r=%u cls=%s sv=%llx,%llx,%llx,%llx st=%x,%x,%x opt=%x,%x,%x sz=%ux%u rect=%u,%u,%u,%u\n",reason,
+                native_legacy_rej_class,
+                (unsigned long long)native_legacy_rej_surfaces[0],(unsigned long long)native_legacy_rej_surfaces[1],
+                (unsigned long long)native_legacy_rej_surfaces[2],(unsigned long long)native_legacy_rej_surfaces[3],
+                native_legacy_rej_state[0],native_legacy_rej_state[1],native_legacy_rej_state[2],
+                native_legacy_rej_options[0],native_legacy_rej_options[1],native_legacy_rej_options[2],
+                native_legacy_rej_size[0],native_legacy_rej_size[1],
+                native_legacy_rej_rects[0][0],native_legacy_rej_rects[0][1],native_legacy_rej_rects[0][2],native_legacy_rej_rects[0][3]);}
     native_legacy_swap_validation_calls=native_legacy_swap_validation_calls+1;
     native_legacy_swap_validation_result=accepted;native_legacy_swap_validation_reason=reason;
     native_legacy_swap_request=(uintptr_t)request;native_legacy_swap_surface=(uintptr_t)surface;
@@ -199,6 +262,10 @@ void native_legacy_copy_timing_observed(uint64_t ticks,uint64_t bytes) {
 }
 __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status,const void *request,uint64_t bytes) {
     native_legacy_transfer_calls=native_legacy_transfer_calls+1;
+    // 2026-11-11: prove the scanout path is alive in msgbuf even after the first
+    // frame parks the text console (the panel dump snapshots msgbuf).
+    if(native_legacy_transfer_calls<=3 || (native_legacy_transfer_calls%128)==0)
+        IOLog("MUYU SWAP n=%u st=%x\n",(unsigned)native_legacy_transfer_calls,(unsigned)status);
     native_legacy_xfer_seconds=native_legacy_seconds_now();
     // A frame reached the scanout, so the render server owns the panel: park the kernel text output so it
     // stops painting over it. Every panic path unparks it before printing.
@@ -434,6 +501,10 @@ extern void native_novatek_touch_start(void) __attribute__((weak_import));
 extern void muyu_data_probe_start(void) __attribute__((weak_import));
 extern void muyu_dump_start_late(void) __attribute__((weak_import));
 extern void muyu_usb_debug_start(void) __attribute__((weak_import));
+// USB layer probe (package/UsbPhyProbe.cpp, muyu-usb-probe=<s>): a read-only survey that answers
+// "which layer of the USB path is dead" - power domain, PHY programming, core reset handshake or
+// link training - before any gadget driver is written again. Weak, so a build without it still links.
+extern void muyu_usb_phy_probe(void) __attribute__((weak_import));
 extern void boot_log_tick(unsigned) __attribute__((weak_import));
 extern void native_touch_muyu_start(void) __attribute__((weak_import));
 extern void sheng_cpufreq_probe(void);
@@ -468,6 +539,7 @@ void native_legacy_display_late_probe(void) {
     /* USB debug console: after the HID service exists (it registers the button sink) and before the
      * graphics client starts, so a serial capture sees the whole user-space boot. */
     if (&muyu_usb_debug_start) muyu_usb_debug_start();
+    if (&muyu_usb_phy_probe) muyu_usb_phy_probe();
     /* UFS diagnostic log (kits/muyu/BootLog.c, sheng-log=1): the writer waits for NativeUfs to publish the root
      * layout, so starting it here only arms it. This is the official log path: the window is readable afterwards
      * from stock recovery with dd + scripts/read-sheng-log.py --decode. */
@@ -551,6 +623,22 @@ void native_legacy_display_late_probe(void) {
                     if(started && (defaultSurface || defaultProbe))native_legacy_default_surface_state(display,defaultSurface==1);
                     if(started && phase==4) {
                         activeLegacyDisplay=display;activeGOPNub=nub;native_legacy_stage=10;
+                        // 2026-11-11: start the GPU hand-off presenter for phase 4 too.
+                        // Mirrors UniXNU-sheng/package/LegacyDisplayProbe.cpp:545-558. It is NOT a
+                        // child of the display-subsystem node: the original display code enumerates
+                        // that node's children and SpringBoard found no display when the presenter
+                        // was attached there (sheng int-075/077).
+                        {
+                            unsigned gpu=0;PE_parse_boot_argn("sheng-fb-gpu",&gpu,sizeof gpu);
+                            if(gpu==1) {
+                                IOService *handoff=native_gop_presenter_create();
+                                IOService *home=IOService::getResourceService();
+                                bool handoffAttached=false;
+                                if(handoff && home)native_gop_presenter_set_source(handoff,nub);
+                                if(handoff && home && handoff->init() && (handoffAttached=handoff->attach(home)) && handoff->start(home))gpuHandoffPresenter=handoff;
+                                else {if(handoffAttached)handoff->detach(home);OSSafeReleaseNULL(handoff);}
+                            }
+                        }
                         finishUnitScalePolicy(true);
                         OSSafeReleaseNULL(displayTreeParent);
                         native_legacy_display_checkpoint();return;

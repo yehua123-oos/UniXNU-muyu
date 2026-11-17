@@ -19,6 +19,11 @@ static const char policy_watchdogd[]="<key>com.apple.watchdogd</key><true/><key>
 // Bring-up isolation: hardware stacks show identityservicesd, contextstored and locationd in a
 // cycle of synchronous XPC waits. A disabled job makes its Mach service lookups fail instead of hang.
 // sheng-disable-jobs=<label>[,<label>...] (restricted label characters, bounded length).
+// sheng-lite-reset=1: write an EMPTY override dict (no Disabled keys) on this boot, clearing every
+// job disable left in /private/var/db/com.apple.xpc.launchd/disabled.plist. The file lives on the
+// persistent Data volume and is only rewritten when a policy arg is present, so simply dropping
+// sheng-lite=1 from the boot args does NOT re-enable the jobs — the stale file persists. One boot
+// with this flag rewrites it empty; later boots (no policy arg) return early and leave it empty.
 static const char policy_tail[]="</dict></plist>\n";
 // sheng-lite=1: jobs that only reach for the network, iCloud or the photo library and have nothing to do on this tablet (no radios, no accounts),
 // all of which start at the first boot of a fresh Data and compete with SpringBoard for the CPU and for memory. The first four are the
@@ -90,6 +95,7 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  int setup=0,reset=0;
  PE_parse_boot_argn("sheng-setup",&setup,sizeof(setup));
  PE_parse_boot_argn("sheng-data-reset",&reset,sizeof(reset));   // 2 = erase Data and show the Hello page; 1 = erase Data, Setup stays skipped
+ int lite_reset=0;PE_parse_boot_argn("sheng-lite-reset",&lite_reset,sizeof(lite_reset));
  if(reset==2)setup=1;
  if(setup==1 && (error=sheng_boot_setup_reset(p,scratch))) {
   sheng_watchdog_policy_status=error;
@@ -97,16 +103,20 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
   return error;
  }
  if(setup==1)printf("sheng setup flags reset: Hello page on this boot\n");
- if(!enabled && !jobs[0] && !lite && !have_mask)return 0;
+ if(!enabled && !jobs[0] && !lite && !have_mask && !lite_reset)return 0;
  policy[0]=0;strlcat(policy,policy_head,sizeof(policy));
  if(enabled)strlcat(policy,policy_watchdogd,sizeof(policy));
- if(lite)for(const char *c=lite_jobs;*c;) {if((error=append_job(&c)))return error;}
- if(have_mask) {
-  unsigned index=0;
-  printf("sheng lite mask: 0x%x\n",lite_mask);
-  for(const char *c=lite_jobs;*c;) {if((error=append_job_masked(&c,index++,lite_mask)))return error;}
+ if(lite_reset) {
+  printf("sheng lite reset: clearing all launchd job disables (empty override dict)\n");
+ } else {
+  if(lite)for(const char *c=lite_jobs;*c;) {if((error=append_job(&c)))return error;}
+  if(have_mask) {
+   unsigned index=0;
+   printf("sheng lite mask: 0x%x\n",lite_mask);
+   for(const char *c=lite_jobs;*c;) {if((error=append_job_masked(&c,index++,lite_mask)))return error;}
+  }
+  for(const char *c=jobs;*c;) {if((error=append_job(&c)))return error;}
  }
- for(const char *c=jobs;*c;) {if((error=append_job(&c)))return error;}
  strlcat(policy,policy_tail,sizeof(policy));
  const char *directory="/private/var/db/com.apple.xpc.launchd";
  const char *path="/private/var/db/com.apple.xpc.launchd/disabled.plist";

@@ -79,15 +79,31 @@ native_legacy_swap_stage (unsigned stage)
   (void)stage;
 }
 
+/* 2026-11-14 01:2x, fix33: with the Adreno plugin finally loading (fix31, owner trust cache) the renderer hands validateSwap a real
+ * IOSurface and every frame is refused *after* the request checks pass: reason 4 means the six surface properties are what reject it.
+ * This stub received exactly those six values and threw them away, so nothing in any log said which one was wrong. Record them
+ * (native_legacy_srej_values, read back by the GPU probe rows) and print the first few, rate limited so a 60 Hz reject loop cannot
+ * own the window: 409 "verify_swap failed" lines in the fix32 boot. */
+extern void IOLog (const char *format, ...);
+volatile uint64_t native_legacy_srej_values[7];
+volatile uint32_t native_legacy_srej_calls;
+
 __attribute__((weak)) void
 native_legacy_surface_rejected (uint64_t width, uint64_t height, uint32_t format,
-                                uint32_t reason, uint64_t a, uint64_t b, uint64_t c)
+                                uint32_t planes, uint64_t stride, uint64_t allocation,
+                                uint64_t length)
 {
-  (void)width;
-  (void)height;
-  (void)format;
-  (void)reason;
-  (void)a;
-  (void)b;
-  (void)c;
+  native_legacy_srej_values[0] = width;
+  native_legacy_srej_values[1] = height;
+  native_legacy_srej_values[2] = format;
+  native_legacy_srej_values[3] = planes;
+  native_legacy_srej_values[4] = stride;
+  native_legacy_srej_values[5] = allocation;
+  native_legacy_srej_values[6] = length;
+  uint32_t n = ++native_legacy_srej_calls;
+  if (n <= 6 || (n % 128u) == 0) {
+    IOLog ("MUYU SREJ w=%llu h=%llu fmt=%x planes=%u stride=%llu alloc=%llu len=%llu n=%u\n",
+           (unsigned long long)width, (unsigned long long)height, (unsigned)format, (unsigned)planes,
+           (unsigned long long)stride, (unsigned long long)allocation, (unsigned long long)length, (unsigned)n);
+  }
 }

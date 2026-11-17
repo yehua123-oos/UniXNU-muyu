@@ -48,6 +48,13 @@ PREBOOT_VOLUME_UUID = '8846FE78-2910-4297-AF97-D59BB6F8FC16'
 PANIC_LOG_BASE = 0xFF800000
 PANIC_LOG_SIZE = 0x00380000
 
+# GMU payload pool: board-owned physical RAM reserved in the UEFI memory map ("GMU Pool") and
+# published to the kernel via this ADT gmu-memory node. The NativeAdreno driver adopts it over
+# IODeviceMemory::withRange instead of allocating from the VM. Must match board.toml [gpu]
+# gmu_pool_* and the UEFI MemoryMapLib "GMU Pool" entry (three-way consistent with uke).
+GMU_POOL_BASE = 0xC8000000
+GMU_POOL_BYTES = 0x02000000
+
 
 def node(name, properties=(), children=()):
     properties = [('name', name.encode() + b'\0'), *properties]
@@ -150,6 +157,17 @@ def main():
     parser.add_argument('--data-ramdisk', action='store_true',
                         help='/chosen/memory-map RAMDisk placeholder; the loader fills in the real range for a scratch Data seed')
     parser.add_argument('--trust-cache', action='store_true', help='Zeroed TrustCache sidecar handoff placeholder')
+    parser.add_argument('--maxvnodes', type=lambda v: int(v, 0), default=None,
+                        help='fix212: write /defaults/kern.maxvnodes. unix_startup() asks '
+                             'PE_get_default("kern.maxvnodes") before it sizes the vnode table from '
+                             'sane_size, so this overrides that size with no kernel change. '
+                             'Omitted = the computed value, unchanged.')
+    parser.add_argument('--gpu-addon', action='store_true',
+                        help='/chosen/memory-map GpuAddon placeholder. unixnu build payload --gpu-addon '
+                             'copies the NGPUADD2 file to kernel.macho.gpuaddon and asks the ADT '
+                             'generator for this placeholder; DarwinBoot fills in its real range. '
+                             'schema 2 devicetree.py has always done this (mappings += GpuAddon); '
+                             'the legacy path needs the flag declared explicitly.')
     parser.add_argument('--persistent-data', action='store_true',
                         help='The Data disk keeps its writes across boots (sheng-data-persist): no ephemeral-storage, so the first-boot data migration runs')
     parser.add_argument('--no-filesystems', action='store_true',
@@ -161,6 +179,23 @@ def main():
     parser.add_argument('--boot-manifest-hash',
                         help='96 hex characters for /chosen/boot-manifest-hash; mount(8) names /private/preboot/<hash> from it')
     args = parser.parse_args()
+    # 17-line compatibility (2026-11-11). uke's 27-line payload.py merge (commit e545150)
+    # replaced the legacy ramdisk-type forwarding
+    #   --packed-data-ramdisk if adt['packed_data_ramdisk'] else --data-ramdisk
+    # with a bare --persistent-data. --persistent-data only suppresses the
+    # ephemeral-storage property; it does NOT declare a /chosen/memory-map
+    # placeholder. DarwinBoot then finds neither RAMDisk nor PackedRAMDisk,
+    # keeps RamdiskOffset == MAX_UINTN and refuses the boot with
+    # EFI_COMPROMISED_DATA ("compromised data" on the 2026-10-26 UEFI).
+    # This board's Data seed is DBRDISK1 packed (board.toml sets
+    # packed_data_ramdisk = true), and a plain RAMDisk would make the loader
+    # size the window for expanded bytes while handing over packed bytes.
+    # Infer the packed placeholder only when the legacy caller supplied
+    # --persistent-data without any explicit ramdisk-type flag.
+    if args.persistent_data and not (args.data_ramdisk or args.packed_data_ramdisk):
+        print('muyu ADT: legacy payload.py omitted the ramdisk-type flag; '
+              'declaring PackedRAMDisk for the DBRDISK1 Data seed')
+        args.packed_data_ramdisk = True
     boot_manifest_hash = None
     if args.boot_manifest_hash:
         try:
@@ -251,19 +286,26 @@ def main():
                         ('amfi-only-platform-code', struct.pack('<I', 1)),
                         *empty_nvram_proxy()],
              [node('memory-map', ([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))] if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
-                                 ([('TrustCache', bytes(16))] if args.trust_cache else [])),
+                                 ([('TrustCache', bytes(16))] if args.trust_cache else []) +
+                                 ([('GpuAddon', bytes(16))] if args.gpu_addon else [])),
               # Read by the original AppleImage4 at start-up; present and empty here.
               node('manifest-properties')]),
         node('cpus', children=cpus),
         *([node('psci', [('compatible', b'arm,psci-1.0\0'), ('method', args.psci_method.encode() + b'\0')])] if len(cpus) > 1 else []),
         # Suspend/resume is not implemented for this board. Use the original
         # root-domain policy input rather than allowing the CPU to park forever.
-        node('defaults', [('sleep-disabled', struct.pack('<I', 1))]),
+        # fix212: kern.maxvnodes is read by unix_startup() *before* it sizes the vnode table from
+        # sane_size, so one 4-byte property here retires the 1024/2048 ceiling without a kernel change.
+        node('defaults', [('sleep-disabled', struct.pack('<I', 1))] +
+                         ([('kern.maxvnodes', struct.pack('<I', args.maxvnodes))] if args.maxvnodes else [])),
         node('options', []),
         # XNU's embedded panic log: pe_init.c maps pram.reg and records the
         # panic header/text there. The memory map keeps it out of DarwinBoot's
         # owned window and the menu reads it before XNU clears it.
         node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
+        # The GMU payload pool, reserved in the UEFI memory map ("GMU Pool") and adopted by the
+        # NativeAdreno driver over IODeviceMemory::withRange instead of allocated from the VM.
+        node('gmu-memory', [('reg', struct.pack('<QQ', GMU_POOL_BASE, GMU_POOL_BYTES))]),
         # The original AppleImage4 panics without a product node. Name and model are the
         # board DT's own strings.
         *( [node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
